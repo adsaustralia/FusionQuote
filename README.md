@@ -1,26 +1,33 @@
-# Fusion Excel Reformat + Flat/Roll Packaging Calculator
+# Excel Formula Fusion – First Build
 
-Streamlit app for Fusion Excel allocation workbooks.
+This Streamlit app uploads an Excel workbook and writes formula-based rows to a selected working sheet.
 
-## What it does
-- Upload one `.xlsx` workbook.
-- Preview sheets in an Excel-like grid.
-- Detect item columns, size/spec row, material row, side/print row, country column, and data rows.
-- Calculates per item and per zone/store:
-  - flat-pack item count
-  - roll item count
-  - total quantity
-  - maximum roll width in mm
-  - number of stores
-- Treats Ferrous/Magnetic/Banner/Vinyl/Fabric as roll materials by default.
-- Adds summary sheets without modifying original sheet layouts.
-- Optional reformat export with frozen panes, widths, and filters applied to copied sheets.
+## Current logic
+
+Default setup is based on `HOKA Clifton 11_MASTER DBDL.xlsx`:
+
+- Working sheet: `DL ANZ ALLOCATION`
+- Reference sheet: `PRINT DB`
+- Working item name row: 4
+- Working size row: 5
+- Working original qty row: 7
+- Store rows: 8:167
+- Country column: I
+- Item columns: AC:EU
+- Reference artwork/name column: C
+- Reference size column: E
+- Reference DS/SS column: F
+
+## Formula outputs
+
+- Country-excluded quantity row, default row 169
+- DS/SS lookup row, default row 168
+
+The workbook keeps formulas in Excel, so small edits can still be made outside the Streamlit app.
 
 ## Run locally
+
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
-
-## Important
-The app is rule-based. Fusion sheets are messy, so always review the detected rows/columns before exporting. Wrong row detection equals wrong packaging count.
