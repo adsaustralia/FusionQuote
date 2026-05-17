@@ -10,7 +10,7 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_TITLE = "Excel Formula Fusion — Dynamic V1"
+APP_TITLE = "Excel Formula Fusion — Smart Dynamic V1.2"
 
 DEFAULTS = {
     "working_sheet": "DL ANZ ALLOCATION",
@@ -107,6 +107,111 @@ def detect_country_column(ws, scan_rows: int = 220) -> str:
             best_col = get_column_letter(c)
     return best_col
 
+
+
+def looks_like_size(value) -> bool:
+    text = norm(value)
+    if not text:
+        return False
+    return bool(re.search(r"(\d+\s*(X|×)\s*\d+|\d+\s?MM|\d+\s?CM|DIA|DIAMETER|Ø)", text, re.I))
+
+
+def detect_name_size_rows(ws, scan_rows: int = 30) -> Tuple[int, int]:
+    """Find the most likely item name row and size row.
+    Assumption: campaign item columns run horizontally and size row is close to name row.
+    """
+    best_size_row = DEFAULTS["working_size_row"]
+    best_size_score = -1
+    for r in range(1, min(ws.max_row, scan_rows) + 1):
+        score = 0
+        for c in range(1, ws.max_column + 1):
+            if looks_like_size(ws.cell(r, c).value):
+                score += 1
+        if score > best_size_score:
+            best_size_score = score
+            best_size_row = r
+
+    # Name row is usually just above the detected size row. Prefer a nearby row with many text cells.
+    candidates = range(max(1, best_size_row - 3), best_size_row)
+    best_name_row = max(1, best_size_row - 1)
+    best_name_score = -1
+    for r in candidates:
+        score = 0
+        for c in range(1, ws.max_column + 1):
+            v = ws.cell(r, c).value
+            if isinstance(v, str) and len(v.strip()) >= 3 and not looks_like_size(v):
+                score += 1
+        if score > best_name_score:
+            best_name_score = score
+            best_name_row = r
+    return best_name_row, best_size_row
+
+
+def detect_qty_start_row(ws, country_col: str, scan_rows: int = 250) -> int:
+    """First row where country column contains a known country. This avoids including headers."""
+    c = column_index_from_string(clean_col(country_col))
+    for r in range(1, min(ws.max_row, scan_rows) + 1):
+        if norm(ws.cell(r, c).value) in KNOWN_COUNTRIES:
+            return r
+    return DEFAULTS["qty_start_row"]
+
+
+def detect_output_rows(ws, qty_end_row: int) -> Tuple[int, int]:
+    """Pick two safe rows under the qty range for DS/SS and clean qty formulas."""
+    dsss_row = qty_end_row + 2
+    clean_qty_row = qty_end_row + 3
+    # If the HOKA-style rows already exist, preserve them.
+    if qty_end_row <= 166 and ws.max_row >= 169:
+        return 168, 169
+    return dsss_row, clean_qty_row
+
+
+def detect_reference_mapping(ws_ref) -> Tuple[int, int, str, str, str]:
+    """Detect PRINT DB-style lookup columns: name/artwork, size, DS/SS."""
+    # Find DS/SS column by actual values first.
+    scores = {}
+    for c in range(1, min(ws_ref.max_column, 80) + 1):
+        score = 0
+        for r in range(1, min(ws_ref.max_row, 250) + 1):
+            v = norm(ws_ref.cell(r, c).value)
+            if v in {"DS", "SS", "D/S", "S/S", "DOUBLE SIDED", "SINGLE SIDED"}:
+                score += 1
+        if score:
+            scores[c] = score
+    dsss_idx = max(scores, key=scores.get) if scores else column_index_from_string(DEFAULTS["ref_dsss_col"])
+
+    # Size column: most size-looking values.
+    size_scores = {}
+    for c in range(1, min(ws_ref.max_column, 80) + 1):
+        score = sum(1 for r in range(1, min(ws_ref.max_row, 250) + 1) if looks_like_size(ws_ref.cell(r, c).value))
+        if score:
+            size_scores[c] = score
+    size_idx = max(size_scores, key=size_scores.get) if size_scores else column_index_from_string(DEFAULTS["ref_size_col"])
+
+    # Name column: nearby text-heavy column, usually before size.
+    best_name_idx = column_index_from_string(DEFAULTS["ref_name_col"])
+    best_name_score = -1
+    for c in range(1, min(ws_ref.max_column, 80) + 1):
+        if c in {size_idx, dsss_idx}:
+            continue
+        score = 0
+        for r in range(1, min(ws_ref.max_row, 250) + 1):
+            v = ws_ref.cell(r, c).value
+            if isinstance(v, str) and len(v.strip()) >= 5 and not looks_like_size(v) and norm(v) not in KNOWN_COUNTRIES:
+                score += 1
+        # prefer columns before size column if tied
+        if score > best_name_score or (score == best_name_score and c < size_idx):
+            best_name_score = score
+            best_name_idx = c
+
+    # First row where all three required values exist.
+    start = DEFAULTS["ref_start_row"]
+    for r in range(1, min(ws_ref.max_row, 250) + 1):
+        if ws_ref.cell(r, best_name_idx).value not in (None, "") and looks_like_size(ws_ref.cell(r, size_idx).value) and norm(ws_ref.cell(r, dsss_idx).value):
+            start = r
+            break
+    end = detect_ref_end_row(ws_ref, start, get_column_letter(best_name_idx), get_column_letter(size_idx))
+    return start, end, get_column_letter(best_name_idx), get_column_letter(size_idx), get_column_letter(dsss_idx)
 
 def detect_active_columns(ws, name_row: int, size_row: int) -> Tuple[str, str]:
     populated = []
@@ -307,10 +412,39 @@ def set_page_style():
     st.markdown(
         """
         <style>
-        .stApp { background:#f7f8fb; }
-        section[data-testid="stSidebar"] { background:#0f2742; }
-        section[data-testid="stSidebar"] * { color:white; }
+        .stApp { background:#f7f8fb; color:#111111; }
         .block-container { padding-top:1.4rem; }
+        section[data-testid="stSidebar"] { background:#0f2742; }
+        section[data-testid="stSidebar"] h1,
+        section[data-testid="stSidebar"] h2,
+        section[data-testid="stSidebar"] h3,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] span { color:#ffffff !important; }
+
+        /* Fix invisible Streamlit input/select text caused by dark sidebar styling */
+        input, textarea,
+        section[data-testid="stSidebar"] input,
+        section[data-testid="stSidebar"] textarea {
+            color:#111111 !important;
+            background-color:#ffffff !important;
+            -webkit-text-fill-color:#111111 !important;
+        }
+        div[data-baseweb="select"] > div,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
+            color:#111111 !important;
+            background-color:#ffffff !important;
+        }
+        div[data-baseweb="select"] span,
+        section[data-testid="stSidebar"] div[data-baseweb="select"] span {
+            color:#111111 !important;
+            -webkit-text-fill-color:#111111 !important;
+        }
+        div[role="listbox"], div[role="option"] {
+            color:#111111 !important;
+            background-color:#ffffff !important;
+        }
+        div[data-baseweb="tag"] span { color:#111111 !important; }
         div[data-testid="stMetric"] { background:white; padding:0.8rem; border-radius:14px; border-left:5px solid #f58220; box-shadow:0 2px 12px rgba(0,0,0,0.06); }
         </style>
         """,
@@ -322,17 +456,28 @@ def get_initial_values(wb):
     sheets = wb.sheetnames
     vals = DEFAULTS.copy()
     vals["working_sheet"] = DEFAULTS["working_sheet"] if DEFAULTS["working_sheet"] in sheets else sheets[0]
-    vals["reference_sheet"] = DEFAULTS["reference_sheet"] if DEFAULTS["reference_sheet"] in sheets else sheets[0]
+    vals["reference_sheet"] = DEFAULTS["reference_sheet"] if DEFAULTS["reference_sheet"] in sheets else (sheets[1] if len(sheets) > 1 else sheets[0])
+
     try:
         ws = wb[vals["working_sheet"]]
         vals["country_col"] = detect_country_column(ws)
+        vals["working_name_row"], vals["working_size_row"] = detect_name_size_rows(ws)
         vals["active_start_col"], vals["active_end_col"] = detect_active_columns(ws, vals["working_name_row"], vals["working_size_row"])
+        vals["qty_start_row"] = detect_qty_start_row(ws, vals["country_col"])
         vals["qty_end_row"] = detect_qty_end_row(ws, vals["qty_start_row"], vals["country_col"])
-        vals["ignore_countries"] = ["NZ"]
+        vals["dsss_output_row"], vals["clean_qty_output_row"] = detect_output_rows(ws, vals["qty_end_row"])
+        countries = detect_countries(ws, vals["country_col"], vals["qty_start_row"], vals["qty_end_row"])
+        vals["ignore_countries"] = ["NZ"] if "NZ" in countries else []
     except Exception:
         pass
+
     try:
-        vals["ref_end_row"] = detect_ref_end_row(wb[vals["reference_sheet"]], vals["ref_start_row"], vals["ref_name_col"], vals["ref_size_col"])
+        rs, re, nc, sc, dc = detect_reference_mapping(wb[vals["reference_sheet"]])
+        vals["ref_start_row"] = rs
+        vals["ref_end_row"] = re
+        vals["ref_name_col"] = nc
+        vals["ref_size_col"] = sc
+        vals["ref_dsss_col"] = dc
     except Exception:
         pass
     return vals
@@ -344,6 +489,7 @@ def sidebar_config(wb) -> MappingConfig:
 
     with st.sidebar:
         st.header("Workbook")
+        st.caption("Smart defaults are auto-detected from the uploaded workbook. Override only if the preview/validation shows a wrong guess.")
         mapping_upload = st.file_uploader("Optional: load mapping JSON", type=["json"])
         if mapping_upload:
             try:
@@ -373,6 +519,9 @@ def sidebar_config(wb) -> MappingConfig:
         ref_name_col = st.text_input("Reference name column", initial["ref_name_col"]).strip().upper()
         ref_size_col = st.text_input("Reference size column", initial["ref_size_col"]).strip().upper()
         ref_dsss_col = st.text_input("Reference DS/SS column", initial["ref_dsss_col"]).strip().upper()
+
+        with st.expander("Auto-detected defaults", expanded=False):
+            st.json(initial)
 
         st.header("Country Exclusion")
         detected = []
@@ -409,7 +558,7 @@ def sidebar_config(wb) -> MappingConfig:
 def main():
     set_page_style()
     st.title(APP_TITLE)
-    st.caption("Dynamic formula generator for clean quantity rows and DS/SS lookup. Upload workbook → confirm mappings → preview formulas → export formula workbook.")
+    st.caption("Smart dynamic formula generator. It auto-detects likely rows/columns, then lets you override before exporting formula-based Excel output.")
 
     uploaded = st.file_uploader("Upload Excel workbook", type=["xlsx"])
     if not uploaded:
