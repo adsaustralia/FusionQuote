@@ -10,7 +10,7 @@ import streamlit as st
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 
-APP_TITLE = "Excel Formula Fusion — Smart Dynamic V1.2"
+APP_TITLE = "Excel Formula Fusion — Smart Dynamic V1.3"
 
 DEFAULTS = {
     "working_sheet": "DL ANZ ALLOCATION",
@@ -412,45 +412,143 @@ def set_page_style():
     st.markdown(
         """
         <style>
-        .stApp { background:#f7f8fb; color:#111111; }
-        .block-container { padding-top:1.4rem; }
-        section[data-testid="stSidebar"] { background:#0f2742; }
+        /* V1.3: plain high-contrast light UI. No dark sidebar. */
+        :root {
+            --eff-bg: #f4f6f8;
+            --eff-card: #ffffff;
+            --eff-text: #111827;
+            --eff-muted: #374151;
+            --eff-border: #d1d5db;
+            --eff-orange: #f58220;
+            --eff-navy: #0f2742;
+        }
+
+        .stApp {
+            background: var(--eff-bg) !important;
+            color: var(--eff-text) !important;
+        }
+        .block-container { padding-top: 1.25rem; }
+
+        /* Sidebar stays light so upload/select/input values are always visible. */
+        section[data-testid="stSidebar"] {
+            background: #ffffff !important;
+            color: var(--eff-text) !important;
+            border-right: 1px solid var(--eff-border);
+        }
+
+        h1, h2, h3, h4, h5, h6,
+        p, span, label, div, small,
         section[data-testid="stSidebar"] h1,
         section[data-testid="stSidebar"] h2,
         section[data-testid="stSidebar"] h3,
-        section[data-testid="stSidebar"] label,
         section[data-testid="stSidebar"] p,
-        section[data-testid="stSidebar"] span { color:#ffffff !important; }
+        section[data-testid="stSidebar"] span,
+        section[data-testid="stSidebar"] label {
+            color: var(--eff-text) !important;
+        }
 
-        /* Fix invisible Streamlit input/select text caused by dark sidebar styling */
+        /* Strong Streamlit widget visibility fixes */
         input, textarea,
+        [data-baseweb="input"] input,
+        [data-baseweb="textarea"] textarea,
         section[data-testid="stSidebar"] input,
         section[data-testid="stSidebar"] textarea {
-            color:#111111 !important;
-            background-color:#ffffff !important;
-            -webkit-text-fill-color:#111111 !important;
+            color: #111827 !important;
+            background-color: #ffffff !important;
+            -webkit-text-fill-color: #111827 !important;
+            caret-color: #111827 !important;
+            border-color: var(--eff-border) !important;
         }
+
         div[data-baseweb="select"] > div,
-        section[data-testid="stSidebar"] div[data-baseweb="select"] > div {
-            color:#111111 !important;
-            background-color:#ffffff !important;
-        }
         div[data-baseweb="select"] span,
-        section[data-testid="stSidebar"] div[data-baseweb="select"] span {
-            color:#111111 !important;
-            -webkit-text-fill-color:#111111 !important;
+        div[data-baseweb="select"] input,
+        div[role="combobox"],
+        div[role="combobox"] span,
+        div[role="listbox"],
+        div[role="option"] {
+            color: #111827 !important;
+            background-color: #ffffff !important;
+            -webkit-text-fill-color: #111827 !important;
         }
-        div[role="listbox"], div[role="option"] {
-            color:#111111 !important;
-            background-color:#ffffff !important;
+
+        /* Multiselect tags */
+        div[data-baseweb="tag"] {
+            background-color: #e5e7eb !important;
+            color: #111827 !important;
         }
-        div[data-baseweb="tag"] span { color:#111111 !important; }
-        div[data-testid="stMetric"] { background:white; padding:0.8rem; border-radius:14px; border-left:5px solid #f58220; box-shadow:0 2px 12px rgba(0,0,0,0.06); }
+        div[data-baseweb="tag"] span {
+            color: #111827 !important;
+            -webkit-text-fill-color: #111827 !important;
+        }
+
+        /* File uploader: this was the main invisible JSON upload problem. */
+        section[data-testid="stFileUploader"],
+        section[data-testid="stFileUploader"] div,
+        section[data-testid="stFileUploader"] span,
+        section[data-testid="stFileUploader"] small,
+        section[data-testid="stFileUploader"] label,
+        div[data-testid="stFileUploader"],
+        div[data-testid="stFileUploader"] div,
+        div[data-testid="stFileUploader"] span,
+        div[data-testid="stFileUploader"] small,
+        div[data-testid="stFileUploader"] label {
+            color: #111827 !important;
+            background-color: #ffffff !important;
+            -webkit-text-fill-color: #111827 !important;
+        }
+        section[data-testid="stFileUploaderDropzone"],
+        div[data-testid="stFileUploaderDropzone"] {
+            background-color: #ffffff !important;
+            border: 1px dashed #6b7280 !important;
+            color: #111827 !important;
+        }
+        section[data-testid="stFileUploaderDropzone"] button,
+        div[data-testid="stFileUploaderDropzone"] button {
+            color: #111827 !important;
+            background-color: #f3f4f6 !important;
+            border: 1px solid #9ca3af !important;
+        }
+
+        /* Expander and metric cards */
+        details, [data-testid="stExpander"] {
+            background-color: #ffffff !important;
+            border: 1px solid var(--eff-border) !important;
+            border-radius: 12px !important;
+        }
+        div[data-testid="stMetric"] {
+            background: #ffffff !important;
+            padding: 0.8rem !important;
+            border-radius: 14px !important;
+            border-left: 5px solid var(--eff-orange) !important;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05) !important;
+        }
+        div[data-testid="stMetric"] label,
+        div[data-testid="stMetric"] div {
+            color: #111827 !important;
+        }
+
+        /* Dataframes/code blocks readable */
+        [data-testid="stDataFrame"],
+        [data-testid="stDataFrame"] * {
+            color: #111827 !important;
+        }
+        pre, code {
+            color: #111827 !important;
+            background-color: #f9fafb !important;
+        }
+
+        /* Buttons */
+        .stButton > button,
+        .stDownloadButton > button {
+            color: #ffffff !important;
+            background-color: var(--eff-navy) !important;
+            border: 1px solid var(--eff-navy) !important;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
-
 
 def get_initial_values(wb):
     sheets = wb.sheetnames
@@ -520,8 +618,10 @@ def sidebar_config(wb) -> MappingConfig:
         ref_size_col = st.text_input("Reference size column", initial["ref_size_col"]).strip().upper()
         ref_dsss_col = st.text_input("Reference DS/SS column", initial["ref_dsss_col"]).strip().upper()
 
-        with st.expander("Auto-detected defaults", expanded=False):
-            st.json(initial)
+        with st.expander("Auto-detected defaults", expanded=True):
+            st.caption("These are the app guesses before your manual overrides.")
+            detected_defaults_df = pd.DataFrame([{"Field": k, "Detected Value": ", ".join(v) if isinstance(v, list) else v} for k, v in initial.items()])
+            st.dataframe(detected_defaults_df, hide_index=True, use_container_width=True)
 
         st.header("Country Exclusion")
         detected = []
@@ -578,6 +678,26 @@ def main():
     m2.metric("Sheets", len(wb.sheetnames))
     m3.metric("Working Sheet", cfg.working_sheet)
     m4.metric("Reference Sheet", cfg.reference_sheet)
+
+    with st.expander("Auto-detected / Current Mapping Summary", expanded=True):
+        st.caption("Check these values before exporting. Auto-detect is a suggestion, not a guarantee.")
+        summary_rows = [
+            ("Working Sheet", cfg.working_sheet),
+            ("Reference Sheet", cfg.reference_sheet),
+            ("Item Columns", f"{cfg.active_start_col}:{cfg.active_end_col}"),
+            ("Name Row", cfg.working_name_row),
+            ("Size Row", cfg.working_size_row),
+            ("Qty Rows", f"{cfg.qty_start_row}:{cfg.qty_end_row}"),
+            ("Country Column", cfg.country_col),
+            ("Ignore Countries", ", ".join(cfg.ignore_countries)),
+            ("DS/SS Output Row", cfg.dsss_output_row),
+            ("Clean Qty Output Row", cfg.clean_qty_output_row),
+            ("Reference Name Column", cfg.ref_name_col),
+            ("Reference Size Column", cfg.ref_size_col),
+            ("Reference DS/SS Column", cfg.ref_dsss_col),
+            ("Reference Rows", f"{cfg.ref_start_row}:{cfg.ref_end_row}"),
+        ]
+        st.dataframe(pd.DataFrame(summary_rows, columns=["Mapping", "Value"]), hide_index=True, use_container_width=True)
 
     with st.expander("1. Workbook Preview", expanded=True):
         preview_sheet = st.selectbox("Preview sheet", wb.sheetnames, index=wb.sheetnames.index(cfg.working_sheet))
