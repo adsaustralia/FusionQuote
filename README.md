@@ -1,52 +1,57 @@
-# Excel Formula Fusion — V1.4
+# Excel Formula Fusion — Dynamic V1.6
 
 Streamlit app for formula-based Excel automation.
 
-## What this version fixes
+## What changed in V1.6
 
-1. **Quantity double-counting fixed**
-   - Clean quantity formula now excludes ignored countries such as NZ.
-   - It also excludes rows where the country cell is blank, preventing total/subtotal rows from being counted again.
+- Uses a form/apply button pattern so mapping changes do not trigger full processing on every click.
+- Multi-select stock/material picker.
+- Stock SQM and stock rate summary sheet.
+- Clean quantity formula uses:
+  - original total qty row
+  - minus ignored country quantities
+  - blank country rows are ignored automatically.
+- Uses `data_only=True` workbook copy for UI values so stock/material row displays calculated values instead of formula text.
+- Keeps a formula-preserving workbook copy for export.
 
-   Example formula:
+## Deploy on Streamlit Cloud
 
-   ```excel
-   =SUMPRODUCT((AC$8:AC$166)*(--(TRIM($I$8:$I$166)<>""))*(--(UPPER(TRIM($I$8:$I$166))<>"NZ")))
-   ```
-
-2. **Visible UI buttons and input text**
-   - Fixed Streamlit theme and CSS so upload, export, and download controls are readable.
-
-3. **Stock/material summary added**
-   - Select stock/material names from the working sheet.
-   - Enter rate per SQM.
-   - App writes Clean SQM formulas and creates a `Formula Fusion Summary` sheet with stock-level SQM and price formulas.
-
-## Files
-
-Upload these files to your GitHub repository root:
+Put these files in the GitHub repo root:
 
 - `app.py`
 - `requirements.txt`
 - `.streamlit/config.toml`
 - `README.md`
 
-## Streamlit Cloud
-
-Main file path:
+Set Streamlit main file path to:
 
 ```text
 app.py
 ```
 
-## Important logic
+## Recommended workflow
 
-The original total quantity row is kept untouched.
+1. Upload workbook.
+2. Review auto-detected mapping.
+3. Change mappings if required.
+4. Click **Apply Mapping** once.
+5. Pick one or more stock/materials.
+6. Enter rates.
+7. Generate workbook.
+8. Download Excel.
 
-Clean Qty is calculated from store rows only, based on the mapped country column:
+## Important formula logic
 
-- included: rows where country is not blank and not ignored
-- excluded: NZ or other ignored countries
-- excluded: blank country rows
+Clean quantity formula example:
 
-This prevents summary rows or repeated totals from doubling the quantity.
+```excel
+=AC$7-SUMIF($I:$I,"NZ",AC:AC)
+```
+
+For multiple ignored countries:
+
+```excel
+=AC$7-SUM(SUMIF($I:$I,{"NZ","FIJI"},AC:AC))
+```
+
+This avoids needing store quantity start/end rows.
