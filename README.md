@@ -1,20 +1,17 @@
-# Excel Formula Fusion V1.9.2 Stable Upload Build
+# Excel Formula Fusion V2.0 Safe Stock Rate Build
 
-This build is designed to stop the Streamlit app freezing or doing nothing immediately after upload.
+This build focuses on stability and clarity around stock/material rate entry.
 
-## What changed
+## Key fixes
 
-- Upload now confirms the file name and sheet names immediately.
-- Workbook processing only runs after clicking **Generate Excel Workbook**.
-- Stock rate changes are staged and saved only after clicking **Refresh / Update Rates**.
-- Multi-stock rate entry is supported.
-- DS loading defaults to 20%.
-- Quantity logic uses total qty row minus ignored-country quantity.
-- Name-based multipliers are detected:
-  - `set of 4` multiplies by 4 and highlights red.
-  - `1 PACK = 100` multiplies by 100 and highlights red.
-  - doubtful set/pack wording highlights orange and does not multiply.
-- The app reads display values from a `data_only=True` workbook where possible, so linked stock/material values show as values instead of formulas.
+- Upload responds first before any heavy Excel processing.
+- Stock/material names are scanned only from the selected item start column to end column.
+- Selected stock/material rates have a clear **Stock/material rates** section.
+- Rates are staged and only saved when **Refresh / Update Rates** is pressed.
+- Workbook generation only runs when **Generate Excel Workbook** is pressed.
+- Country scan range is auto-detected to keep formulas lighter.
+- Data-only workbook loading is read-only to reduce Streamlit Cloud memory use.
+- Error details are shown inside the app instead of silently failing.
 
 ## Default HOKA mapping
 
@@ -38,6 +35,15 @@ Reference sheet defaults:
 - Reference DS/SS column: F
 - Reference stock/material column: G
 
+## How to use stock rates
+
+1. Upload the Excel workbook.
+2. Press **Apply Mapping / Refresh Stock List**.
+3. Pick one or more stocks from **Pick stock/material to calculate SQM and rate**.
+4. Enter each $/sqm in the **Stock/material rates** section.
+5. Press **Refresh / Update Rates**.
+6. Press **Generate Excel Workbook** only when ready.
+
 ## Deployment
 
 Upload these files to the root of your GitHub repository:
@@ -47,12 +53,12 @@ Upload these files to the root of your GitHub repository:
 - `.streamlit/config.toml`
 - `README.md`
 
-In Streamlit Cloud, set the main file path to:
+Streamlit Cloud main file path:
 
 ```text
 app.py
 ```
 
-## Important
+## Note on saved rates
 
-Do not expect Streamlit Cloud to permanently store stock rates on the server. Use the JSON download/upload option to back up your rates.
+Streamlit Cloud does not permanently store server-side session memory. Download the stock rate memory JSON and upload it next time to reuse rates.

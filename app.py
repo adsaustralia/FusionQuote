@@ -12,7 +12,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter, column_index_from_string
 
-APP_VERSION = "V1.9.2 Stable Upload Build"
+APP_VERSION = "V2.0 Safe Stock Rate Build"
 
 st.set_page_config(page_title="Excel Formula Fusion", layout="wide")
 
@@ -194,34 +194,75 @@ def copy_row_style(ws, source_row: int, target_row: int, start_col: int, end_col
 
 
 def get_stock_options(ws_values, stock_row: int, start_col: int, end_col: int) -> List[str]:
+    """Return unique stock/material values only from the selected item column range.
+    This intentionally starts from item_start_col, not from column A, so instruction columns and notes are ignored.
+    """
     stocks = []
+    seen = set()
     for c in range(start_col, end_col + 1):
-        s = norm_text(ws_values.cell(stock_row, c).value)
-        if s and s not in stocks:
+        raw = ws_values.cell(stock_row, c).value
+        s = norm_text(raw)
+        if not s:
+            continue
+        key = s.upper()
+        if key not in seen:
+            seen.add(key)
             stocks.append(s)
     return stocks
 
 
+def detect_country_scan_end(ws_values, country_col: str, min_row: int = 8, max_row: int = 500) -> int:
+    """Find the last row that looks like a country row. Keeps formulas lighter than scanning whole sheets."""
+    tokens = {"NZ", "AUS", "AUSTRALIA", "NEW ZEALAND", "FIJI", "SG", "SINGAPORE"}
+    col_idx = column_index_from_string(country_col)
+    last = min_row
+    for r in range(min_row, min(max_row, ws_values.max_row) + 1):
+        val = norm_text(ws_values.cell(r, col_idx).value).upper()
+        if val in tokens:
+            last = r
+    return max(last, min_row)
+
+
 def update_rate_memory(selected_stocks: List[str], default_rate: float):
+    """Visible, low-rerun rate editor. Rates are staged and only saved when the button is pressed."""
     if "rate_memory" not in st.session_state:
         st.session_state.rate_memory = {}
+
+    st.markdown("### Stock/material rates")
+    if not selected_stocks:
+        st.info("Pick one or more stock/material names above. The rate fields will appear here.")
+        return
+
+    st.caption("Enter the $/sqm for each selected stock/material, then press **Refresh / Update Rates**. Typing here will not generate the workbook.")
+    current_rows = []
+    for stock in selected_stocks:
+        current_rows.append({"Stock/material": stock, "Current saved $/sqm": float(st.session_state.rate_memory.get(stock, default_rate))})
+    st.dataframe(current_rows, use_container_width=True, hide_index=True)
+
     with st.form("rate_update_form", clear_on_submit=False):
-        st.markdown("### Stock rates")
-        cols = st.columns(3)
         staged = {}
+        cols = st.columns(2)
         for idx, stock in enumerate(selected_stocks):
+            safe_key = re.sub(r"[^A-Za-z0-9_]+", "_", stock)[:80]
             current = float(st.session_state.rate_memory.get(stock, default_rate))
-            with cols[idx % 3]:
-                staged[stock] = st.number_input(f"$ / sqm — {stock[:45]}", min_value=0.0, value=current, step=0.10, key=f"rate_{stock}")
+            with cols[idx % 2]:
+                staged[stock] = st.number_input(
+                    f"Rate $/sqm for: {stock}",
+                    min_value=0.0,
+                    value=current,
+                    step=0.10,
+                    format="%.2f",
+                    key=f"rate_input_{safe_key}_{idx}",
+                )
         submitted = st.form_submit_button("Refresh / Update Rates")
         if submitted:
             st.session_state.rate_memory.update(staged)
-            st.success("Rates updated in this session. Download JSON if you want a backup.")
+            st.success("Rates updated for this session. Download the JSON backup if you want to reuse them next time.")
 
 
 def make_workbook(upload_bytes: bytes, cfg: Dict[str, Any], rate_memory: Dict[str, float]) -> bytes:
     wb = load_workbook(io.BytesIO(upload_bytes))
-    wb_values = load_workbook(io.BytesIO(upload_bytes), data_only=True)
+    wb_values = load_workbook(io.BytesIO(upload_bytes), data_only=True, read_only=True)
     ws = wb[cfg["working_sheet"]]
     ws_values = wb_values[cfg["working_sheet"]]
 
@@ -239,7 +280,7 @@ def make_workbook(upload_bytes: bytes, cfg: Dict[str, Any], rate_memory: Dict[st
     price_row = cfg["price_output_row"]
     ref_sheet = cfg["reference_sheet"]
 
-    max_scan_row = max(ws.max_row, 250)
+    max_scan_row = int(cfg.get("country_scan_end_row", max(ws.max_row, 250)))
     red_fill = PatternFill("solid", fgColor="FFC7CE")
     orange_fill = PatternFill("solid", fgColor="FCE4D6")
     green_fill = PatternFill("solid", fgColor="C6EFCE")
@@ -341,8 +382,16 @@ def make_workbook(upload_bytes: bytes, cfg: Dict[str, Any], rate_memory: Dict[st
     for col in range(1, 6):
         sm.column_dimensions[get_column_letter(col)].width = 28
 
+    try:
+        wb_values.close()
+    except Exception:
+        pass
     out = io.BytesIO()
     wb.save(out)
+    try:
+        wb.close()
+    except Exception:
+        pass
     return out.getvalue()
 
 
@@ -443,7 +492,7 @@ with st.form("mapping_form", clear_on_submit=False):
 # Apply or initialise mapping.
 if apply_clicked or "cfg" not in st.session_state:
     try:
-        wb_values = load_workbook(io.BytesIO(st.session_state.uploaded_bytes), data_only=True, read_only=False)
+        wb_values = load_workbook(io.BytesIO(st.session_state.uploaded_bytes), data_only=True, read_only=True)
         ws_values = wb_values[working_sheet]
         if auto_cols:
             start_idx, end_idx = detect_item_columns(ws_values, int(name_row), int(size_row), int(stock_row))
@@ -453,6 +502,7 @@ if apply_clicked or "cfg" not in st.session_state:
             item_start_col = safe_col(manual_start_col, "AC")
             item_end_col = safe_col(manual_end_col, "IG")
         stock_options = get_stock_options(ws_values, int(stock_row), column_index_from_string(item_start_col), column_index_from_string(item_end_col))
+        country_scan_end_row = detect_country_scan_end(ws_values, safe_col(country_col, "I"), min_row=int(total_qty_row)+1)
         wb_values.close()
         st.session_state.cfg = {
             "working_sheet": working_sheet,
@@ -477,10 +527,11 @@ if apply_clicked or "cfg" not in st.session_state:
             "item_start_col": item_start_col,
             "item_end_col": item_end_col,
             "ds_loading": float(ds_loading),
+            "country_scan_end_row": int(country_scan_end_row),
             "stock_options": stock_options,
             "selected_stocks": st.session_state.get("selected_stocks", []),
         }
-        st.success(f"Mapping applied. Item columns: {item_start_col} to {item_end_col}. Stocks found: {len(stock_options)}")
+        st.success(f"Mapping applied. Item columns: {item_start_col} to {item_end_col}. Stock/material list is scanned only from {item_start_col} to {item_end_col}. Stocks found: {len(stock_options)}")
     except Exception:
         st.error("Mapping failed. Check row/column settings.")
         st.code(traceback.format_exc())
@@ -495,6 +546,7 @@ st.markdown("### Current mapping")
 st.json({k: v for k, v in cfg.items() if k != "stock_options"}, expanded=False)
 
 stock_options = cfg.get("stock_options", [])
+st.caption(f"Stock/material names are read from row {cfg.get('stock_row')} starting at column {cfg.get('item_start_col')} and ending at column {cfg.get('item_end_col')}.")
 selected_stocks = st.multiselect("Pick stock/material to calculate SQM and rate", stock_options, default=cfg.get("selected_stocks", []))
 st.session_state.selected_stocks = selected_stocks
 st.session_state.cfg["selected_stocks"] = selected_stocks
@@ -505,7 +557,7 @@ rate_bytes = json.dumps(st.session_state.rate_memory, indent=2).encode("utf-8")
 st.download_button("Download stock rate memory JSON", data=rate_bytes, file_name="stock_rate_memory.json", mime="application/json")
 
 st.markdown("### Generate")
-st.warning("Generating workbook only runs when you press this button. Typing rates or changing mapping will not generate the Excel file.")
+st.warning("Generating workbook only runs when you press this button. Typing rates or changing mapping will not generate the Excel file. If the app crashes here, reduce selected stocks or item column range first.")
 
 if st.button("Generate Excel Workbook"):
     try:
