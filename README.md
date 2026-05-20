@@ -1,64 +1,60 @@
-# Excel Formula Fusion V2.0 Safe Stock Rate Build
+# Excel Formula Fusion V2.1 Recovery Stable
 
-This build focuses on stability and clarity around stock/material rate entry.
+This is a recovery/stability build. It deliberately avoids heavy processing during upload.
 
-## Key fixes
+## Important change
 
-- Upload responds first before any heavy Excel processing.
-- Stock/material names are scanned only from the selected item start column to end column.
-- Selected stock/material rates have a clear **Stock/material rates** section.
-- Rates are staged and only saved when **Refresh / Update Rates** is pressed.
-- Workbook generation only runs when **Generate Excel Workbook** is pressed.
-- Country scan range is auto-detected to keep formulas lighter.
-- Data-only workbook loading is read-only to reduce Streamlit Cloud memory use.
-- Error details are shown inside the app instead of silently failing.
+Upload only stores the workbook. You must press **Read workbook / detect sheets** before mapping appears. This prevents Streamlit Cloud from crashing while typing or uploading.
+
+## Main features
+
+- Upload workbook safely.
+- Read sheet names only after button click.
+- Select working and reference sheets.
+- Stock/material list scans only from selected Start Column to End Column.
+- Enter multiple stock rates in a clear table-style section.
+- Save stock rates in session and download/upload JSON backup.
+- Clean qty formula uses total qty row minus ignored-country rows.
+- DS loading default is 20%.
+- Detects confident multipliers like `set of 4` and `1 PACK = 100`; red flag and multiply.
+- Orange flag for doubtful set/pack wording; does not multiply.
+- Formula workbook is generated only after **Generate Excel Workbook**.
 
 ## Default HOKA mapping
 
-Working sheet defaults:
-
+- Working sheet: DL ANZ ALLOCATION
+- Reference sheet: PRINT DB
 - Name row: 4
 - Size row: 5
-- Stock/material row: 6
+- Stock row: 6
 - Original total qty row: 7
 - Country column: I
+- Item columns: AC to IG
 - DS/SS output row: 168
 - Clean qty output row: 169
-- Multiplier output row: 170
-- SQM output row: 171
-- Price output row: 172
+- Multiplier row: 170
+- SQM row: 171
+- Price row: 172
 
-Reference sheet defaults:
+## Reference defaults
 
-- Reference name column: C
-- Reference size column: E
-- Reference DS/SS column: F
-- Reference stock/material column: G
+- Name/artwork column: C
+- Size column: E
+- DS/SS column: F
+- Stock/material column: G
+- Reference rows: 12 to 141
 
-## How to use stock rates
+## GitHub / Streamlit Cloud
 
-1. Upload the Excel workbook.
-2. Press **Apply Mapping / Refresh Stock List**.
-3. Pick one or more stocks from **Pick stock/material to calculate SQM and rate**.
-4. Enter each $/sqm in the **Stock/material rates** section.
-5. Press **Refresh / Update Rates**.
-6. Press **Generate Excel Workbook** only when ready.
-
-## Deployment
-
-Upload these files to the root of your GitHub repository:
+Upload these to your repository root:
 
 - `app.py`
 - `requirements.txt`
 - `.streamlit/config.toml`
 - `README.md`
 
-Streamlit Cloud main file path:
+Main file path:
 
 ```text
 app.py
 ```
-
-## Note on saved rates
-
-Streamlit Cloud does not permanently store server-side session memory. Download the stock rate memory JSON and upload it next time to reuse rates.
