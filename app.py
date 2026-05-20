@@ -51,6 +51,7 @@ class MappingConfig:
     clean_qty_output_row: int = 169
     sqm_output_row: int = 170
     price_output_row: int = 171
+    enable_multiplier_detection: bool = True
     ds_loading_percent: float = 20.0
     ref_name_col: str = "C"
     ref_size_col: str = "E"
@@ -172,14 +173,61 @@ def build_ignore_array(countries: List[str]) -> str:
     return f'"{vals[0]}"' if len(vals) == 1 else "{" + ",".join([f'"{v}"' for v in vals]) + "}"
 
 
-def clean_qty_formula(col: str, cfg: MappingConfig) -> str:
+def clean_qty_formula(col: str, cfg: MappingConfig, multiplier: int = 1) -> str:
     countries = [c for c in cfg.ignore_countries if c.strip()]
     # Uses only the original total qty row, then subtracts matching ignored-country rows from same item column.
     # Blank country rows do not match and do not subtract.
     if len(countries) <= 1:
         country = countries[0].upper() if countries else "NZ"
-        return f'={col}${cfg.total_qty_row}-SUMIF(${cfg.country_col}:${cfg.country_col},"{country}",{col}:{col})'
-    return f'={col}${cfg.total_qty_row}-SUM(SUMIF(${cfg.country_col}:${cfg.country_col},{build_ignore_array(countries)},{col}:{col}))'
+        base = f'({col}${cfg.total_qty_row}-SUMIF(${cfg.country_col}:${cfg.country_col},"{country}",{col}:{col}))'
+    else:
+        base = f'({col}${cfg.total_qty_row}-SUM(SUMIF(${cfg.country_col}:${cfg.country_col},{build_ignore_array(countries)},{col}:{col})))'
+    if int(multiplier or 1) > 1:
+        return f'={base}*{int(multiplier)}'
+    return f'={base}'
+
+
+def detect_name_multiplier(name_text: str) -> Dict[str, object]:
+    """Return controlled multiplier decision from item/name text.
+
+    Red/confident = multiply. Orange/suspicious = flag but do not multiply.
+    The patterns are intentionally conservative to avoid silent quantity corruption.
+    """
+    text = norm(name_text)
+    upper = text.upper()
+    candidates: List[Tuple[int, str]] = []
+
+    patterns = [
+        (r'\bSET\s+OF\s+(\d{1,4})\b', 'set of N'),
+        (r'\bSET\s*[x×]\s*(\d{1,4})\b', 'set x N'),
+        (r'\bPACK\s+OF\s+(\d{1,5})\b', 'pack of N'),
+        (r'\b(?:1\s*)?PACK\s*=\s*(\d{1,5})\b', 'pack = N'),
+        (r'\b(?:1\s*)?PK\s*=\s*(\d{1,5})\b', 'pk = N'),
+    ]
+    for pat, label in patterns:
+        for m in re.finditer(pat, upper):
+            try:
+                val = int(m.group(1))
+                if 1 < val <= 10000:
+                    candidates.append((val, label))
+            except Exception:
+                pass
+
+    unique_vals = sorted(set(v for v, _ in candidates))
+    marker_present = bool(re.search(r'\b(SET|PACK|PACKS|PK)\b', upper))
+
+    if len(unique_vals) == 1:
+        value = unique_vals[0]
+        reason = ', '.join(sorted(set(label for v, label in candidates if v == value)))
+        return {"status": "CONFIDENT", "multiplier": value, "reason": reason}
+
+    if len(unique_vals) > 1:
+        return {"status": "SUSPICIOUS", "multiplier": 1, "reason": f"multiple possible multipliers: {unique_vals}"}
+
+    if marker_present:
+        return {"status": "SUSPICIOUS", "multiplier": 1, "reason": "set/pack wording but no safe multiplier pattern"}
+
+    return {"status": "NONE", "multiplier": 1, "reason": ""}
 
 
 def ds_formula(col: str, cfg: MappingConfig) -> str:
@@ -268,6 +316,34 @@ def make_summary_sheet(wb, cfg: MappingConfig, selected_stocks: List[str], stock
     ws.freeze_panes = "A2"
 
 
+def make_multiplier_audit_sheet(wb, audit_rows: List[Dict[str, object]]) -> None:
+    if "Qty Multiplier Audit" in wb.sheetnames:
+        del wb["Qty Multiplier Audit"]
+    ws = wb.create_sheet("Qty Multiplier Audit")
+    headers = ["Column", "Name", "Status", "Multiplier", "Reason"]
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(1, c, h)
+        cell.fill = PatternFill("solid", fgColor="0F172A")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    red = PatternFill("solid", fgColor="FCA5A5")
+    orange = PatternFill("solid", fgColor="FDBA74")
+    for r, item in enumerate(audit_rows, 2):
+        ws.cell(r, 1, item.get("column", ""))
+        ws.cell(r, 2, item.get("name", ""))
+        ws.cell(r, 3, item.get("status", ""))
+        ws.cell(r, 4, item.get("multiplier", 1))
+        ws.cell(r, 5, item.get("reason", ""))
+        status = item.get("status", "")
+        fill = red if status == "CONFIDENT" else orange if status == "SUSPICIOUS" else None
+        if fill:
+            for c in range(1, 6):
+                ws.cell(r, c).fill = fill
+    for i, w in enumerate([12, 80, 16, 14, 45], 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+
+
 def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: List[str], stock_rates: Dict[str, float]) -> bytes:
     wb = load_workbook(io.BytesIO(uploaded_bytes))
     wb_values = load_workbook(io.BytesIO(uploaded_bytes), data_only=True, read_only=False)
@@ -276,6 +352,14 @@ def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: L
     cols = col_range(cfg.item_start_col, cfg.item_end_col)
     stock_by_col = {col: norm(ws_values[f"{col}{cfg.stock_row}"].value) for col in cols}
     selected_set = set(selected_stocks)
+    multiplier_by_col: Dict[str, Dict[str, object]] = {}
+    audit_rows: List[Dict[str, object]] = []
+    for col in cols:
+        item_name = norm(ws_values[f"{col}{cfg.name_row}"].value)
+        decision = detect_name_multiplier(item_name) if cfg.enable_multiplier_detection else {"status": "NONE", "multiplier": 1, "reason": "disabled"}
+        multiplier_by_col[col] = decision
+        if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
+            audit_rows.append({"column": col, "name": item_name, **decision})
 
     for target in [cfg.ds_ss_output_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
         copy_row_style(ws, cfg.total_qty_row, target, cols)
@@ -295,9 +379,19 @@ def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: L
         c.alignment = Alignment(horizontal="right")
 
     for col in cols:
+        decision = multiplier_by_col.get(col, {"status": "NONE", "multiplier": 1})
+        multiplier = int(decision.get("multiplier", 1) or 1) if decision.get("status") == "CONFIDENT" else 1
         ws[f"{col}{cfg.ds_ss_output_row}"] = ds_formula(col, cfg)
-        ws[f"{col}{cfg.clean_qty_output_row}"] = clean_qty_formula(col, cfg)
+        ws[f"{col}{cfg.clean_qty_output_row}"] = clean_qty_formula(col, cfg, multiplier)
         ws[f"{col}{cfg.sqm_output_row}"] = sqm_formula(col, cfg)
+        if decision.get("status") == "CONFIDENT":
+            fill = PatternFill("solid", fgColor="FCA5A5")  # red: multiplied automatically
+            for row in [cfg.name_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
+                ws[f"{col}{row}"].fill = fill
+        elif decision.get("status") == "SUSPICIOUS":
+            fill = PatternFill("solid", fgColor="FDBA74")  # orange: check manually, no multiply
+            for row in [cfg.name_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
+                ws[f"{col}{row}"].fill = fill
         stock = stock_by_col.get(col, "")
         if stock in selected_set:
             rate_row = selected_stocks.index(stock) + 2
@@ -308,6 +402,7 @@ def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: L
         ws[f"{col}{cfg.price_output_row}"].number_format = '$#,##0.00'
 
     make_summary_sheet(wb, cfg, selected_stocks, stock_rates)
+    make_multiplier_audit_sheet(wb, audit_rows)
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -323,8 +418,8 @@ def config_from_json(data: dict, sheet_names: List[str]):
     return cfg
 
 
-st.title("Excel Formula Fusion — Stable V1.7.1")
-st.caption("Safer loader, rate memory, multi-stock rates, DS loading, and formula workbook export.")
+st.title("Excel Formula Fusion — V1.8")
+st.caption("Adds controlled quantity multiplier detection with red/orange audit flags.")
 
 uploaded_file = st.file_uploader("Upload Excel workbook", type=["xlsx"], key="main_workbook")
 if not uploaded_file:
@@ -404,6 +499,7 @@ with st.form("mapping_form", clear_on_submit=False):
         sqm_output_row = st.number_input("SQM Output Row", min_value=1, value=int(cfg.sqm_output_row), step=1)
         price_output_row = st.number_input("Price Output Row", min_value=1, value=int(cfg.price_output_row), step=1)
         ds_loading_percent = st.number_input("DS Loading %", min_value=0.0, max_value=500.0, value=float(cfg.ds_loading_percent), step=1.0)
+        enable_multiplier_detection = st.checkbox("Detect set/pack quantity multipliers", value=bool(cfg.enable_multiplier_detection))
 
     st.subheader("2) Reference Sheet Columns")
     r1, r2, r3, r4, r5, r6 = st.columns(6)
@@ -440,6 +536,7 @@ if apply_mapping:
             clean_qty_output_row=int(clean_qty_output_row),
             sqm_output_row=int(sqm_output_row),
             price_output_row=int(price_output_row),
+            enable_multiplier_detection=bool(enable_multiplier_detection),
             ds_loading_percent=float(ds_loading_percent),
             ref_name_col=ref_name_col,
             ref_size_col=ref_size_col,
@@ -459,6 +556,22 @@ ws_values = wb_values[cfg.working_sheet]
 
 st.subheader("Current Mapping Summary")
 st.dataframe(pd.DataFrame([asdict(cfg)]).T.reset_index().rename(columns={"index": "Setting", 0: "Value"}), use_container_width=True, hide_index=True)
+
+st.subheader("Quantity Multiplier Detection Preview")
+if cfg.enable_multiplier_detection:
+    audit_preview = []
+    for col in col_range(cfg.item_start_col, cfg.item_end_col):
+        item_name = norm(ws_values[f"{col}{cfg.name_row}"].value)
+        decision = detect_name_multiplier(item_name)
+        if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
+            audit_preview.append({"Column": col, "Name": item_name, "Status": decision.get("status"), "Multiplier": decision.get("multiplier"), "Reason": decision.get("reason")})
+    if audit_preview:
+        st.dataframe(pd.DataFrame(audit_preview), use_container_width=True, hide_index=True)
+        st.caption("CONFIDENT rows will be multiplied and highlighted red. SUSPICIOUS rows will be highlighted orange but not multiplied.")
+    else:
+        st.info("No set/pack multiplier wording detected in the selected item columns.")
+else:
+    st.info("Multiplier detection is disabled.")
 
 st.subheader("Stock / Material Rates")
 all_stocks = unique_stocks(ws_values, cfg)
@@ -495,7 +608,9 @@ with st.expander("Rate memory backup / restore"):
 
 st.subheader("Formula Preview")
 preview_col = cfg.item_start_col
-st.code(clean_qty_formula(preview_col, cfg), language="excel")
+example_decision = detect_name_multiplier(norm(ws_values[f"{preview_col}{cfg.name_row}"].value)) if cfg.enable_multiplier_detection else {"multiplier": 1, "status": "NONE"}
+example_mult = int(example_decision.get("multiplier", 1) or 1) if example_decision.get("status") == "CONFIDENT" else 1
+st.code(clean_qty_formula(preview_col, cfg, example_mult), language="excel")
 st.code(ds_formula(preview_col, cfg), language="excel")
 st.code(sqm_formula(preview_col, cfg), language="excel")
 if selected_stocks:

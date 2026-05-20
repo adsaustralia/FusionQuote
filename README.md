@@ -1,33 +1,43 @@
-# Excel Formula Fusion — Stable V1.7.1
+# Excel Formula Fusion V1.8
 
-Streamlit app for formula-based Excel workbook automation.
+Streamlit app for formula-based Excel processing.
 
-## Main fixes in V1.7.1
+## New in V1.8
 
-- safer app startup: no cached openpyxl workbook objects
-- better error handling if workbook loading or export fails
-- upload button and download button visibility kept light/high-contrast
-- multi-stock/material selection
-- stock rate memory with JSON backup/restore
-- DS loading default 20%
-- clean quantity = original total qty row minus ignored-country quantity
-- does not require store qty start/end rows
+- Detects quantity multipliers in item/name text.
+- Confident patterns are multiplied automatically and highlighted red.
+- Suspicious patterns are highlighted orange and are not multiplied.
+- Adds a `Qty Multiplier Audit` sheet for checking all flagged columns.
 
-## Deploy
+## Confident multiplier examples
 
-Upload these files to the root of your GitHub repo:
+- `set of 4` → multiplier 4
+- `set x 4` → multiplier 4
+- `1 PACK = 100` → multiplier 100
+- `PACK OF 100` → multiplier 100
+
+## Safety rule
+
+If the app is not confident, it does not multiply. It only highlights the item orange for manual review.
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Streamlit Cloud
+
+Upload these files to your GitHub repository root:
 
 - `app.py`
 - `requirements.txt`
 - `.streamlit/config.toml`
 - `README.md`
 
-In Streamlit Cloud, set main file path:
+Set main file path to:
 
 ```text
 app.py
 ```
-
-## Important
-
-Streamlit reruns when widgets change. This version keeps mapping edits inside an Apply Mapping form to avoid exporting/processing on every small change.
