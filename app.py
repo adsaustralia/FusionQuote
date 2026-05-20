@@ -344,18 +344,21 @@ def make_multiplier_audit_sheet(wb, audit_rows: List[Dict[str, object]]) -> None
     ws.freeze_panes = "A2"
 
 
-def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: List[str], stock_rates: Dict[str, float]) -> bytes:
+def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: List[str], stock_rates: Dict[str, float], stock_by_col=None, item_name_by_col=None) -> bytes:
+    # Load the editable workbook only at export time. Avoid loading a second workbook here unless absolutely needed.
     wb = load_workbook(io.BytesIO(uploaded_bytes))
-    wb_values = load_workbook(io.BytesIO(uploaded_bytes), data_only=True, read_only=False)
     ws = wb[cfg.working_sheet]
-    ws_values = wb_values[cfg.working_sheet]
     cols = col_range(cfg.item_start_col, cfg.item_end_col)
-    stock_by_col = {col: norm(ws_values[f"{col}{cfg.stock_row}"].value) for col in cols}
+    if stock_by_col is None or item_name_by_col is None:
+        wb_values = load_workbook(io.BytesIO(uploaded_bytes), data_only=True, read_only=True)
+        ws_values = wb_values[cfg.working_sheet]
+        stock_by_col = {col: norm(ws_values[f"{col}{cfg.stock_row}"].value) for col in cols}
+        item_name_by_col = {col: norm(ws_values[f"{col}{cfg.name_row}"].value) for col in cols}
     selected_set = set(selected_stocks)
     multiplier_by_col: Dict[str, Dict[str, object]] = {}
     audit_rows: List[Dict[str, object]] = []
     for col in cols:
-        item_name = norm(ws_values[f"{col}{cfg.name_row}"].value)
+        item_name = norm(item_name_by_col.get(col, ""))
         decision = detect_name_multiplier(item_name) if cfg.enable_multiplier_detection else {"status": "NONE", "multiplier": 1, "reason": "disabled"}
         multiplier_by_col[col] = decision
         if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
@@ -418,8 +421,8 @@ def config_from_json(data: dict, sheet_names: List[str]):
     return cfg
 
 
-st.title("Excel Formula Fusion — V1.8")
-st.caption("Adds controlled quantity multiplier detection with red/orange audit flags.")
+st.title("Excel Formula Fusion — V1.9")
+st.caption("Adds controlled stock-rate updates to reduce Streamlit reruns and memory spikes.")
 
 uploaded_file = st.file_uploader("Upload Excel workbook", type=["xlsx"], key="main_workbook")
 if not uploaded_file:
@@ -574,24 +577,44 @@ else:
     st.info("Multiplier detection is disabled.")
 
 st.subheader("Stock / Material Rates")
+st.info("Rates are staged inside a form. Changing a price will not regenerate the workbook. Press Refresh / Update Rates when finished.")
 all_stocks = unique_stocks(ws_values, cfg)
 rate_memory = load_rate_memory()
 selected_defaults = [s for s in all_stocks if s in rate_memory]
 if not selected_defaults and all_stocks:
     selected_defaults = all_stocks[:1]
-selected_stocks = st.multiselect("Pick one or more stocks/materials", all_stocks, default=selected_defaults)
+selected_stocks = st.multiselect("Pick one or more stocks/materials", all_stocks, default=selected_defaults, key="selected_stocks")
 
-stock_rates: Dict[str, float] = {}
+stock_rates: Dict[str, float] = {stock: float(rate_memory.get(stock, 0.0)) for stock in selected_stocks}
 if selected_stocks:
-    cols = st.columns(min(4, max(1, len(selected_stocks))))
-    for i, stock in enumerate(selected_stocks):
-        with cols[i % len(cols)]:
-            stock_rates[stock] = st.number_input(f"Rate: {stock[:35]}", min_value=0.0, value=float(rate_memory.get(stock, 0.0)), step=0.10, key=f"rate_{stock}")
-    if st.button("Save Rates Memory"):
+    with st.form("stock_rates_form", clear_on_submit=False):
+        st.caption("Enter or edit all rates, then press Refresh / Update Rates once.")
+        cols = st.columns(min(4, max(1, len(selected_stocks))))
+        staged_rates: Dict[str, float] = {}
+        for i, stock in enumerate(selected_stocks):
+            with cols[i % len(cols)]:
+                key = "rate_input_" + re.sub(r"[^A-Za-z0-9_]+", "_", stock)[:80]
+                staged_rates[stock] = st.number_input(
+                    f"Rate: {stock[:35]}",
+                    min_value=0.0,
+                    value=float(rate_memory.get(stock, 0.0)),
+                    step=0.10,
+                    key=key,
+                )
+        update_rates = st.form_submit_button("Refresh / Update Rates")
+    if update_rates:
         merged = load_rate_memory()
-        merged.update(stock_rates)
+        merged.update(staged_rates)
         save_rate_memory(merged)
-        st.success("Rates saved.")
+        st.success("Rates updated and saved to memory.")
+        rate_memory = load_rate_memory()
+        stock_rates = {stock: float(rate_memory.get(stock, 0.0)) for stock in selected_stocks}
+
+    st.dataframe(
+        pd.DataFrame([{"Stock / Material": s, "Saved Rate": float(load_rate_memory().get(s, 0.0))} for s in selected_stocks]),
+        use_container_width=True,
+        hide_index=True,
+    )
 else:
     st.warning("No stocks selected. Price row will be 0 unless you select stock/materials.")
 
@@ -632,7 +655,11 @@ if generate:
         merged.update(stock_rates)
         save_rate_memory(merged)
         with st.spinner("Generating formula workbook..."):
-            output = apply_formulas(uploaded_bytes, cfg, selected_stocks, stock_rates)
+            cols_for_export = col_range(cfg.item_start_col, cfg.item_end_col)
+            stock_by_col = {col: norm(ws_values[f"{col}{cfg.stock_row}"].value) for col in cols_for_export}
+            item_name_by_col = {col: norm(ws_values[f"{col}{cfg.name_row}"].value) for col in cols_for_export}
+            latest_rates = {stock: float(load_rate_memory().get(stock, 0.0)) for stock in selected_stocks}
+            output = apply_formulas(uploaded_bytes, cfg, selected_stocks, latest_rates, stock_by_col, item_name_by_col)
         st.success("Workbook generated.")
         st.download_button("Download Excel Workbook", output, "excel_formula_fusion_output.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except Exception as e:
