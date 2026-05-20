@@ -1,18 +1,17 @@
-# Excel Formula Fusion — Dynamic V1.6
+# Excel Formula Fusion — Dynamic V1.7
 
 Streamlit app for formula-based Excel automation.
 
-## What changed in V1.6
+## V1.7 fixes
 
-- Uses a form/apply button pattern so mapping changes do not trigger full processing on every click.
-- Multi-select stock/material picker.
-- Stock SQM and stock rate summary sheet.
-- Clean quantity formula uses:
-  - original total qty row
-  - minus ignored country quantities
-  - blank country rows are ignored automatically.
-- Uses `data_only=True` workbook copy for UI values so stock/material row displays calculated values instead of formula text.
-- Keeps a formula-preserving workbook copy for export.
+- Fixed file uploader/button visibility by removing the black uploader styling.
+- Faster workbook generation: no repeated workbook load inside every item column loop.
+- Stock/material selector supports multiple stocks.
+- Stock rates are remembered in session and saved to `data/stock_rates_memory.json` when possible.
+- Added stock rate memory JSON download/upload for backup and Streamlit Cloud redeploys.
+- Added DS loading percentage, default 20%.
+- Item price formula applies DS loading only when DS/SS lookup returns DS / Double Sided / D/S.
+- Stock summary total price is summed from item price formulas, so DS loading is included correctly.
 
 ## Deploy on Streamlit Cloud
 
@@ -29,29 +28,8 @@ Set Streamlit main file path to:
 app.py
 ```
 
-## Recommended workflow
+## Important notes
 
-1. Upload workbook.
-2. Review auto-detected mapping.
-3. Change mappings if required.
-4. Click **Apply Mapping** once.
-5. Pick one or more stock/materials.
-6. Enter rates.
-7. Generate workbook.
-8. Download Excel.
+Streamlit reruns the script when widgets change. This app uses forms for mapping changes, but stock/rate widgets still rerun lightly. Heavy Excel export only runs when you click **Generate Excel Workbook**.
 
-## Important formula logic
-
-Clean quantity formula example:
-
-```excel
-=AC$7-SUMIF($I:$I,"NZ",AC:AC)
-```
-
-For multiple ignored countries:
-
-```excel
-=AC$7-SUM(SUMIF($I:$I,{"NZ","FIJI"},AC:AC))
-```
-
-This avoids needing store quantity start/end rows.
+Stock rates can be backed up by downloading `stock_rates_memory.json`.

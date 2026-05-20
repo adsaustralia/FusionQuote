@@ -4,6 +4,7 @@ import re
 from copy import copy
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -23,8 +24,14 @@ div[data-baseweb="select"] > div { color: #111827 !important; background-color: 
 div[data-baseweb="select"] span { color: #111827 !important; }
 div[role="listbox"], div[role="option"] { color: #111827 !important; background-color: #ffffff !important; }
 button, .stButton button, .stDownloadButton button { color: #ffffff !important; background-color: #0f172a !important; border: 1px solid #0f172a !important; font-weight: 700 !important; }
+.stDownloadButton button p, .stButton button p { color: #ffffff !important; }
 .stDownloadButton button:hover, .stButton button:hover { background-color: #f97316 !important; border-color: #f97316 !important; color: #111827 !important; }
+.stDownloadButton button:hover p, .stButton button:hover p { color: #111827 !important; }
+[data-testid="stFileUploader"] { background:#ffffff !important; border:1px solid #cbd5e1 !important; border-radius:12px !important; padding:8px !important; }
 [data-testid="stFileUploader"] * { color: #111827 !important; }
+[data-testid="stFileUploader"] button { background:#ffffff !important; color:#111827 !important; border:1px solid #94a3b8 !important; }
+[data-testid="stFileUploader"] button p { color:#111827 !important; }
+[data-testid="stFileUploaderFileName"], [data-testid="stFileUploaderFile"] * { color:#111827 !important; background:#ffffff !important; }
 .block-container { padding-top: 1.5rem; }
 .card { background: #ffffff; padding: 1rem; border-radius: 14px; border: 1px solid #dbe3ef; box-shadow: 0 1px 3px rgba(15,23,42,.08); }
 .good { color: #047857; font-weight: 700; }
@@ -35,6 +42,32 @@ button, .stButton button, .stDownloadButton button { color: #ffffff !important; 
 """, unsafe_allow_html=True)
 
 COUNTRY_DEFAULTS = ["NZ"]
+RATE_MEMORY_PATH = Path("data/stock_rates_memory.json")
+
+
+def load_rate_memory() -> Dict[str, float]:
+    if "rate_memory" in st.session_state:
+        return dict(st.session_state.rate_memory)
+    try:
+        if RATE_MEMORY_PATH.exists():
+            data = json.loads(RATE_MEMORY_PATH.read_text(encoding="utf-8"))
+            st.session_state.rate_memory = {str(k): float(v) for k, v in data.items()}
+            return dict(st.session_state.rate_memory)
+    except Exception:
+        pass
+    st.session_state.rate_memory = {}
+    return {}
+
+
+def save_rate_memory(memory: Dict[str, float]) -> None:
+    cleaned = {str(k): float(v) for k, v in memory.items() if str(k).strip()}
+    st.session_state.rate_memory = cleaned
+    try:
+        RATE_MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        RATE_MEMORY_PATH.write_text(json.dumps(cleaned, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        # Streamlit Cloud storage can be ephemeral/read-only in some deployments. Session memory still works.
+        pass
 
 @dataclass
 class MappingConfig:
@@ -51,6 +84,7 @@ class MappingConfig:
     ds_ss_output_row: int = 168
     sqm_output_row: int = 170
     price_output_row: int = 171
+    ds_loading_percent: float = 20.0
     ref_name_col: str = "C"
     ref_size_col: str = "E"
     ref_ds_col: str = "F"
@@ -210,7 +244,10 @@ def build_sqm_formula(col: str, cfg: MappingConfig) -> str:
 
 
 def build_price_formula(col: str, cfg: MappingConfig, rate_cell: str) -> str:
-    return f'=IFERROR({col}${cfg.sqm_output_row}*{rate_cell},0)'
+    # Increase price by DS loading when DS/SS lookup row returns DS / Double Sided variants.
+    ds_cell = f'{col}${cfg.ds_ss_output_row}'
+    loading = 1 + (float(cfg.ds_loading_percent) / 100.0)
+    return f'=IFERROR({col}${cfg.sqm_output_row}*{rate_cell}*IF(OR(UPPER({ds_cell})="DS",UPPER({ds_cell})="DOUBLE SIDED",UPPER({ds_cell})="D/S"),{loading},1),0)'
 
 
 def unique_stock_values(ws_values, cfg: MappingConfig) -> List[str]:
@@ -244,33 +281,39 @@ def make_summary_sheet(wb, cfg: MappingConfig, selected_stocks: List[str], stock
     if "Stock SQM Summary" in wb.sheetnames:
         del wb["Stock SQM Summary"]
     ws_sum = wb.create_sheet("Stock SQM Summary")
-    headers = ["Stock / Material", "Total SQM", "Rate per SQM", "Total Price"]
+    headers = ["Stock / Material", "Total SQM", "Base Rate / SQM", "DS Loading %", "Total Price"]
     for c, h in enumerate(headers, 1):
         cell = ws_sum.cell(1, c, h)
         cell.fill = PatternFill("solid", fgColor="0F172A")
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center")
-    ws = wb[cfg.working_sheet]
-    item_cols = col_range(cfg.item_start_col, cfg.item_end_col)
-    stock_range = f"{cfg.working_sheet}!${cfg.item_start_col}${cfg.stock_row}:${cfg.item_end_col}${cfg.stock_row}"
-    sqm_range = f"{cfg.working_sheet}!${cfg.item_start_col}${cfg.sqm_output_row}:${cfg.item_end_col}${cfg.sqm_output_row}"
+    stock_range = f"'{cfg.working_sheet}'!${cfg.item_start_col}${cfg.stock_row}:${cfg.item_end_col}${cfg.stock_row}"
+    sqm_range = f"'{cfg.working_sheet}'!${cfg.item_start_col}${cfg.sqm_output_row}:${cfg.item_end_col}${cfg.sqm_output_row}"
+    price_range = f"'{cfg.working_sheet}'!${cfg.item_start_col}${cfg.price_output_row}:${cfg.item_end_col}${cfg.price_output_row}"
     for i, stock in enumerate(selected_stocks, 2):
         ws_sum.cell(i, 1, stock)
         ws_sum.cell(i, 2, f'=SUMIF({stock_range},A{i},{sqm_range})')
         ws_sum.cell(i, 3, float(stock_rates.get(stock, 0.0)))
-        ws_sum.cell(i, 4, f'=B{i}*C{i}')
-    for col in range(1, 5):
-        ws_sum.column_dimensions[get_column_letter(col)].width = [38, 16, 16, 16][col-1]
+        ws_sum.cell(i, 4, float(cfg.ds_loading_percent) / 100.0)
+        # Total price is summed from item formulas so DS items get the 20% loading correctly.
+        ws_sum.cell(i, 5, f'=SUMIF({stock_range},A{i},{price_range})')
+    widths = [38, 16, 16, 14, 16]
+    for col in range(1, 6):
+        ws_sum.column_dimensions[get_column_letter(col)].width = widths[col-1]
     for r in range(2, 2 + len(selected_stocks)):
         ws_sum.cell(r, 2).number_format = '0.00'
         ws_sum.cell(r, 3).number_format = '$#,##0.00'
-        ws_sum.cell(r, 4).number_format = '$#,##0.00'
+        ws_sum.cell(r, 4).number_format = '0%'
+        ws_sum.cell(r, 5).number_format = '$#,##0.00'
     ws_sum.freeze_panes = "A2"
-
 
 def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: List[str], stock_rates: Dict[str, float]) -> bytes:
     wb = load_workbook(io.BytesIO(uploaded_bytes))
+    wb_values = load_workbook(io.BytesIO(uploaded_bytes), data_only=True, read_only=True)
+    ws_values = wb_values[cfg.working_sheet]
     ws = wb[cfg.working_sheet]
+    selected_set = set(selected_stocks)
+    stock_by_col = {col: norm_text(ws_values[f"{col}{cfg.stock_row}"].value) for col in col_range(cfg.item_start_col, cfg.item_end_col)}
     # Preserve visible style by copying from nearby total qty row.
     for target_row in [cfg.ds_ss_output_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
         copy_row_style(ws, cfg.total_qty_row, target_row, cfg.item_start_col, cfg.item_end_col)
@@ -295,8 +338,8 @@ def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: L
         ws[f"{col}{cfg.clean_qty_output_row}"] = build_clean_qty_formula(col, cfg)
         ws[f"{col}{cfg.sqm_output_row}"] = build_sqm_formula(col, cfg)
         # Price per item uses summary rate only if exact stock selected; otherwise 0.
-        stock_val = norm_text(load_workbook(io.BytesIO(uploaded_bytes), data_only=True)[cfg.working_sheet][f"{col}{cfg.stock_row}"].value)
-        if stock_val in selected_stocks:
+        stock_val = stock_by_col.get(col, "")
+        if stock_val in selected_set:
             rate_index = selected_stocks.index(stock_val) + 2
             rate_cell = f"'Stock SQM Summary'!$C${rate_index}"
             ws[f"{col}{cfg.price_output_row}"] = build_price_formula(col, cfg, rate_cell)
@@ -324,8 +367,8 @@ def config_from_json(data: dict, sheet_names: List[str]) -> Optional[MappingConf
         return None
 
 
-st.title("Excel Formula Fusion — Dynamic V1.6")
-st.caption("Formula-based Excel automation with batched mapping changes and multi-stock SQM/rate calculation.")
+st.title("Excel Formula Fusion — Dynamic V1.7")
+st.caption("Formula-based Excel automation with rate memory, DS loading, and faster export.")
 
 uploaded_file = st.file_uploader("Upload Excel workbook", type=["xlsx"])
 
@@ -399,6 +442,7 @@ with st.form("mapping_form"):
         clean_qty_output_row = st.number_input("Clean Qty Output Row", min_value=1, value=int(cfg.clean_qty_output_row), step=1)
         sqm_output_row = st.number_input("SQM Output Row", min_value=1, value=int(cfg.sqm_output_row), step=1)
         price_output_row = st.number_input("Price Output Row", min_value=1, value=int(cfg.price_output_row), step=1)
+        ds_loading_percent = st.number_input("DS Loading %", min_value=0.0, max_value=500.0, value=float(cfg.ds_loading_percent), step=1.0)
 
     st.subheader("2) Reference Sheet Columns")
     r1, r2, r3, r4, r5, r6 = st.columns(6)
@@ -432,6 +476,7 @@ if apply_mapping:
         ds_ss_output_row=int(ds_ss_output_row),
         sqm_output_row=int(sqm_output_row),
         price_output_row=int(price_output_row),
+        ds_loading_percent=float(ds_loading_percent),
         ref_name_col=ref_name_col,
         ref_size_col=ref_size_col,
         ref_ds_col=ref_ds_col,
@@ -453,20 +498,53 @@ st.dataframe(summary, use_container_width=True, hide_index=True)
 
 st.subheader("Stock / Material Selection")
 all_stocks = unique_stock_values(ws_values, cfg)
+rate_memory = load_rate_memory()
 selected_stocks = st.multiselect(
     "Pick one or more stock/materials for SQM and rate calculation",
     options=all_stocks,
-    default=all_stocks[:1] if all_stocks else [],
+    default=[s for s in all_stocks if s in rate_memory][:4] or (all_stocks[:1] if all_stocks else []),
 )
 stock_rates = {}
 if selected_stocks:
-    st.write("Enter square metre rate for each selected stock/material:")
+    st.write("Enter square metre rate for each selected stock/material. Rates are remembered in this app session and saved to rate memory JSON.")
     rate_cols = st.columns(min(4, len(selected_stocks)))
     for i, stock in enumerate(selected_stocks):
         with rate_cols[i % len(rate_cols)]:
-            stock_rates[stock] = st.number_input(f"Rate: {stock[:35]}", min_value=0.0, value=0.0, step=0.10, key=f"rate_{stock}")
+            default_rate = float(rate_memory.get(stock, 0.0))
+            stock_rates[stock] = st.number_input(
+                f"Rate: {stock[:35]}",
+                min_value=0.0,
+                value=default_rate,
+                step=0.10,
+                key=f"rate_{stock}",
+            )
+    save_rates_now = st.button("Save Rates Memory")
+    if save_rates_now:
+        updated_memory = dict(rate_memory)
+        updated_memory.update(stock_rates)
+        save_rate_memory(updated_memory)
+        st.success("Rates saved to memory for this app/repo session.")
 else:
     st.warning("Select at least one stock/material if you want stock SQM and rate summary.")
+
+with st.expander("Rate memory backup / restore", expanded=False):
+    st.caption("Use this if Streamlit Cloud restarts or you redeploy. Download the JSON and upload it later to restore rates.")
+    rate_json_upload = st.file_uploader("Upload stock rate memory JSON", type=["json"], key="rate_memory_json")
+    if rate_json_upload is not None:
+        try:
+            loaded_rates = json.load(rate_json_upload)
+            cleaned_rates = {str(k): float(v) for k, v in loaded_rates.items()}
+            save_rate_memory(cleaned_rates)
+            st.success("Rate memory loaded. Refresh/select stocks to see saved rates.")
+        except Exception as e:
+            st.error(f"Could not load rate memory JSON: {e}")
+    current_memory = load_rate_memory()
+    st.download_button(
+        "Download Stock Rate Memory JSON",
+        data=json.dumps(current_memory, indent=2, sort_keys=True),
+        file_name="stock_rates_memory.json",
+        mime="application/json",
+    )
 
 st.subheader("Formula Preview")
 preview_col = cfg.item_start_col
@@ -491,6 +569,10 @@ with export_col2:
     )
 
 if generate:
+    # Save latest entered rates automatically before generating.
+    updated_memory = load_rate_memory()
+    updated_memory.update(stock_rates)
+    save_rate_memory(updated_memory)
     with st.spinner("Generating formula workbook..."):
         output_bytes = apply_formulas(uploaded_bytes, cfg, selected_stocks, stock_rates)
     st.success("Workbook generated.")
