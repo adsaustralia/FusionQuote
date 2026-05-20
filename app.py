@@ -1,10 +1,11 @@
 import io
 import json
 import re
+import traceback
 from copy import copy
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Any
 
 import pandas as pd
 import streamlit as st
@@ -22,7 +23,6 @@ section[data-testid="stSidebar"] { background:#ffffff !important; }
 [data-testid="stFileUploader"] { background:#ffffff !important; border:1px solid #cbd5e1 !important; border-radius:12px !important; padding:10px !important; }
 [data-testid="stFileUploader"] * { color:#111827 !important; }
 [data-testid="stFileUploader"] button { background:#ffffff !important; color:#111827 !important; border:1px solid #94a3b8 !important; }
-[data-testid="stFileUploader"] button p { color:#111827 !important; }
 input, textarea { color:#111827 !important; background:#ffffff !important; }
 div[data-baseweb="select"] > div { color:#111827 !important; background:#ffffff !important; border-color:#94a3b8 !important; }
 div[data-baseweb="select"] span { color:#111827 !important; }
@@ -31,6 +31,7 @@ div[role="listbox"], div[role="option"] { color:#111827 !important; background:#
 .stButton button p, .stDownloadButton button p { color:#ffffff !important; }
 .stButton button:hover, .stDownloadButton button:hover { background:#f97316 !important; color:#111827 !important; border-color:#f97316 !important; }
 .stButton button:hover p, .stDownloadButton button:hover p { color:#111827 !important; }
+.safe-card { background:#fff; border:1px solid #cbd5e1; border-radius:14px; padding:14px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,7 +63,7 @@ class MappingConfig:
     ignore_countries: Tuple[str, ...] = ("NZ",)
 
 
-def norm(v) -> str:
+def norm(v: Any) -> str:
     return "" if v is None else str(v).strip()
 
 
@@ -71,11 +72,8 @@ def quote_sheet(name: str) -> str:
 
 
 def col_range(start_col: str, end_col: str) -> List[str]:
-    try:
-        s = column_index_from_string(start_col.upper())
-        e = column_index_from_string(end_col.upper())
-    except Exception:
-        return []
+    s = column_index_from_string(start_col.upper())
+    e = column_index_from_string(end_col.upper())
     if e < s:
         s, e = e, s
     return [get_column_letter(i) for i in range(s, e + 1)]
@@ -100,15 +98,30 @@ def save_rate_memory(memory: Dict[str, float]) -> None:
         RATE_MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
         RATE_MEMORY_PATH.write_text(json.dumps(cleaned, indent=2, sort_keys=True), encoding="utf-8")
     except Exception:
+        # Streamlit Cloud file system can be ephemeral; session memory still works.
         pass
+
+
+def get_sheet_names(uploaded_bytes: bytes) -> List[str]:
+    wb = load_workbook(io.BytesIO(uploaded_bytes), read_only=True, data_only=True)
+    names = wb.sheetnames
+    wb.close()
+    return names
+
+
+def load_values_workbook(uploaded_bytes: bytes):
+    # read_only + data_only keeps memory low and returns visible/cached values, not formula text.
+    return load_workbook(io.BytesIO(uploaded_bytes), read_only=True, data_only=True)
 
 
 def detect_country_col(ws) -> str:
     terms = {"AUS", "AU", "AUSTRALIA", "NZ", "NEW ZEALAND", "FIJI", "SG", "SINGAPORE"}
     best_col, best_count = "I", -1
-    for c in range(1, ws.max_column + 1):
+    max_col = min(ws.max_column or 1, 300)
+    max_row = min(ws.max_row or 1, 250)
+    for c in range(1, max_col + 1):
         count = 0
-        for r in range(1, min(ws.max_row, 250) + 1):
+        for r in range(1, max_row + 1):
             if norm(ws.cell(r, c).value).upper() in terms:
                 count += 1
         if count > best_count:
@@ -120,7 +133,8 @@ def detect_country_col(ws) -> str:
 def detect_item_cols(ws, name_row=4, size_row=5, qty_row=7) -> Tuple[str, str]:
     size_pat = re.compile(r"\d+\s*(mm|cm)?\s*[x×]\s*\d+", re.I)
     hits = []
-    for c in range(1, ws.max_column + 1):
+    max_col = min(ws.max_column or 1, 350)
+    for c in range(1, max_col + 1):
         score = 0
         if norm(ws.cell(name_row, c).value):
             score += 1
@@ -132,21 +146,21 @@ def detect_item_cols(ws, name_row=4, size_row=5, qty_row=7) -> Tuple[str, str]:
         if score >= 3:
             hits.append(c)
     if not hits:
-        return "AC", get_column_letter(ws.max_column)
+        return "AC", get_column_letter(max_col)
     return get_column_letter(min(hits)), get_column_letter(max(hits))
 
 
 def detect_reference_columns(ws) -> Dict[str, str]:
     out = {"name": "C", "size": "E", "ds": "F", "stock": "G"}
-    for r in range(1, min(ws.max_row, 30) + 1):
-        for c in range(1, ws.max_column + 1):
+    for r in range(1, min(ws.max_row or 1, 40) + 1):
+        for c in range(1, min(ws.max_column or 1, 80) + 1):
             t = norm(ws.cell(r, c).value).upper()
             col = get_column_letter(c)
             if t in {"ARTWORK", "ARTWORK NAME", "NAME", "DESCRIPTION", "ITEM"}:
                 out["name"] = col
             if "FINISH SIZE" in t or t == "SIZE":
                 out["size"] = col
-            if "DS" in t and "SS" in t:
+            if ("DS" in t and "SS" in t) or "SIDE" in t:
                 out["ds"] = col
             if "MATERIAL" in t or "STOCK" in t:
                 out["stock"] = col
@@ -159,44 +173,56 @@ def detect_reference_rows(ws, name_col="C", size_col="E") -> Tuple[int, int]:
         nc = column_index_from_string(name_col)
         sc = column_index_from_string(size_col)
     except Exception:
-        return 1, ws.max_row
-    for r in range(1, ws.max_row + 1):
+        return 1, min(ws.max_row or 300, 300)
+    for r in range(1, min(ws.max_row or 1, 1000) + 1):
         if norm(ws.cell(r, nc).value) and norm(ws.cell(r, sc).value):
             rows.append(r)
-    return (min(rows), max(rows)) if rows else (1, ws.max_row)
+    return (min(rows), max(rows)) if rows else (1, min(ws.max_row or 300, 300))
 
 
-def build_ignore_array(countries: List[str]) -> str:
-    vals = [c.strip().upper().replace('"', '') for c in countries if c.strip()]
-    if not vals:
-        vals = ["NZ"]
-    return f'"{vals[0]}"' if len(vals) == 1 else "{" + ",".join([f'"{v}"' for v in vals]) + "}"
+def auto_config(uploaded_bytes: bytes, sheet_names: List[str]) -> MappingConfig:
+    default_work = "DL ANZ ALLOCATION" if "DL ANZ ALLOCATION" in sheet_names else sheet_names[0]
+    default_ref = "PRINT DB" if "PRINT DB" in sheet_names else sheet_names[0]
+    wb = load_values_workbook(uploaded_bytes)
+    ws_work = wb[default_work]
+    ws_ref = wb[default_ref]
+    start_col, end_col = detect_item_cols(ws_work)
+    ref_cols = detect_reference_columns(ws_ref)
+    ref_start, ref_end = detect_reference_rows(ws_ref, ref_cols["name"], ref_cols["size"])
+    country_col = detect_country_col(ws_work)
+    wb.close()
+    return MappingConfig(
+        working_sheet=default_work,
+        reference_sheet=default_ref,
+        item_start_col=start_col,
+        item_end_col=end_col,
+        country_col=country_col,
+        ref_name_col=ref_cols["name"],
+        ref_size_col=ref_cols["size"],
+        ref_ds_col=ref_cols["ds"],
+        ref_stock_col=ref_cols["stock"],
+        ref_start_row=ref_start,
+        ref_end_row=ref_end,
+    )
 
 
 def clean_qty_formula(col: str, cfg: MappingConfig, multiplier: int = 1) -> str:
-    countries = [c for c in cfg.ignore_countries if c.strip()]
-    # Uses only the original total qty row, then subtracts matching ignored-country rows from same item column.
-    # Blank country rows do not match and do not subtract.
-    if len(countries) <= 1:
-        country = countries[0].upper() if countries else "NZ"
-        base = f'({col}${cfg.total_qty_row}-SUMIF(${cfg.country_col}:${cfg.country_col},"{country}",{col}:{col}))'
+    countries = [c.strip().upper().replace('"', '') for c in cfg.ignore_countries if c.strip()]
+    if not countries:
+        countries = ["NZ"]
+    if len(countries) == 1:
+        base = f'({col}${cfg.total_qty_row}-SUMIF(${cfg.country_col}:${cfg.country_col},"{countries[0]}",{col}:{col}))'
     else:
-        base = f'({col}${cfg.total_qty_row}-SUM(SUMIF(${cfg.country_col}:${cfg.country_col},{build_ignore_array(countries)},{col}:{col})))'
+        arr = "{" + ",".join([f'"{c}"' for c in countries]) + "}"
+        base = f'({col}${cfg.total_qty_row}-SUM(SUMIF(${cfg.country_col}:${cfg.country_col},{arr},{col}:{col})))'
     if int(multiplier or 1) > 1:
         return f'={base}*{int(multiplier)}'
     return f'={base}'
 
 
 def detect_name_multiplier(name_text: str) -> Dict[str, object]:
-    """Return controlled multiplier decision from item/name text.
-
-    Red/confident = multiply. Orange/suspicious = flag but do not multiply.
-    The patterns are intentionally conservative to avoid silent quantity corruption.
-    """
     text = norm(name_text)
     upper = text.upper()
-    candidates: List[Tuple[int, str]] = []
-
     patterns = [
         (r'\bSET\s+OF\s+(\d{1,4})\b', 'set of N'),
         (r'\bSET\s*[x×]\s*(\d{1,4})\b', 'set x N'),
@@ -204,6 +230,7 @@ def detect_name_multiplier(name_text: str) -> Dict[str, object]:
         (r'\b(?:1\s*)?PACK\s*=\s*(\d{1,5})\b', 'pack = N'),
         (r'\b(?:1\s*)?PK\s*=\s*(\d{1,5})\b', 'pk = N'),
     ]
+    candidates = []
     for pat, label in patterns:
         for m in re.finditer(pat, upper):
             try:
@@ -212,21 +239,15 @@ def detect_name_multiplier(name_text: str) -> Dict[str, object]:
                     candidates.append((val, label))
             except Exception:
                 pass
-
-    unique_vals = sorted(set(v for v, _ in candidates))
-    marker_present = bool(re.search(r'\b(SET|PACK|PACKS|PK)\b', upper))
-
-    if len(unique_vals) == 1:
-        value = unique_vals[0]
-        reason = ', '.join(sorted(set(label for v, label in candidates if v == value)))
-        return {"status": "CONFIDENT", "multiplier": value, "reason": reason}
-
-    if len(unique_vals) > 1:
-        return {"status": "SUSPICIOUS", "multiplier": 1, "reason": f"multiple possible multipliers: {unique_vals}"}
-
-    if marker_present:
+    vals = sorted(set(v for v, _ in candidates))
+    marker = bool(re.search(r'\b(SET|PACK|PACKS|PK)\b', upper))
+    if len(vals) == 1:
+        v = vals[0]
+        return {"status": "CONFIDENT", "multiplier": v, "reason": ', '.join(sorted(set(label for val, label in candidates if val == v)))}
+    if len(vals) > 1:
+        return {"status": "SUSPICIOUS", "multiplier": 1, "reason": f"multiple possible multipliers: {vals}"}
+    if marker:
         return {"status": "SUSPICIOUS", "multiplier": 1, "reason": "set/pack wording but no safe multiplier pattern"}
-
     return {"status": "NONE", "multiplier": 1, "reason": ""}
 
 
@@ -255,24 +276,33 @@ def price_formula(col: str, cfg: MappingConfig, rate_cell: str) -> str:
     return f'=IFERROR({col}${cfg.sqm_output_row}*{rate_cell}*IF(OR(UPPER({ds_cell})="DS",UPPER({ds_cell})="DOUBLE SIDED",UPPER({ds_cell})="D/S"),{load},1),0)'
 
 
-def unique_stocks(ws_values, cfg: MappingConfig) -> List[str]:
+def unique_stocks(uploaded_bytes: bytes, cfg: MappingConfig) -> List[str]:
+    wb = load_values_workbook(uploaded_bytes)
+    ws = wb[cfg.working_sheet]
     vals = []
     for col in col_range(cfg.item_start_col, cfg.item_end_col):
-        v = norm(ws_values[f"{col}{cfg.stock_row}"].value)
+        v = norm(ws[f"{col}{cfg.stock_row}"].value)
         if v and v not in vals:
             vals.append(v)
+    wb.close()
     return sorted(vals)
 
 
-def preview_df(ws, max_rows=30, max_cols=30) -> pd.DataFrame:
-    rows = []
-    max_r = min(ws.max_row, max_rows)
-    max_c = min(ws.max_column, max_cols)
-    for r in range(1, max_r + 1):
-        rows.append([ws.cell(r, c).value for c in range(1, max_c + 1)])
-    df = pd.DataFrame(rows, columns=[get_column_letter(c) for c in range(1, max_c + 1)])
-    df.insert(0, "Row", range(1, len(df) + 1))
-    return df
+def get_ui_maps(uploaded_bytes: bytes, cfg: MappingConfig) -> Tuple[Dict[str, str], Dict[str, str], List[Dict[str, Any]]]:
+    wb = load_values_workbook(uploaded_bytes)
+    ws = wb[cfg.working_sheet]
+    stock_by_col = {}
+    name_by_col = {}
+    audit = []
+    for col in col_range(cfg.item_start_col, cfg.item_end_col):
+        stock_by_col[col] = norm(ws[f"{col}{cfg.stock_row}"].value)
+        name = norm(ws[f"{col}{cfg.name_row}"].value)
+        name_by_col[col] = name
+        decision = detect_name_multiplier(name) if cfg.enable_multiplier_detection else {"status":"NONE","multiplier":1,"reason":"disabled"}
+        if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
+            audit.append({"Column": col, "Name": name, "Status": decision.get("status"), "Multiplier": decision.get("multiplier"), "Reason": decision.get("reason")})
+    wb.close()
+    return stock_by_col, name_by_col, audit
 
 
 def copy_row_style(ws, source_row: int, target_row: int, cols: List[str]) -> None:
@@ -329,12 +359,12 @@ def make_multiplier_audit_sheet(wb, audit_rows: List[Dict[str, object]]) -> None
     red = PatternFill("solid", fgColor="FCA5A5")
     orange = PatternFill("solid", fgColor="FDBA74")
     for r, item in enumerate(audit_rows, 2):
-        ws.cell(r, 1, item.get("column", ""))
-        ws.cell(r, 2, item.get("name", ""))
-        ws.cell(r, 3, item.get("status", ""))
-        ws.cell(r, 4, item.get("multiplier", 1))
-        ws.cell(r, 5, item.get("reason", ""))
-        status = item.get("status", "")
+        ws.cell(r, 1, item.get("column", item.get("Column", "")))
+        ws.cell(r, 2, item.get("name", item.get("Name", "")))
+        ws.cell(r, 3, item.get("status", item.get("Status", "")))
+        ws.cell(r, 4, item.get("multiplier", item.get("Multiplier", 1)))
+        ws.cell(r, 5, item.get("reason", item.get("Reason", "")))
+        status = item.get("status", item.get("Status", ""))
         fill = red if status == "CONFIDENT" else orange if status == "SUSPICIOUS" else None
         if fill:
             for c in range(1, 6):
@@ -344,25 +374,12 @@ def make_multiplier_audit_sheet(wb, audit_rows: List[Dict[str, object]]) -> None
     ws.freeze_panes = "A2"
 
 
-def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: List[str], stock_rates: Dict[str, float], stock_by_col=None, item_name_by_col=None) -> bytes:
-    # Load the editable workbook only at export time. Avoid loading a second workbook here unless absolutely needed.
+def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: List[str], stock_rates: Dict[str, float], stock_by_col: Dict[str, str], name_by_col: Dict[str, str]) -> bytes:
     wb = load_workbook(io.BytesIO(uploaded_bytes))
     ws = wb[cfg.working_sheet]
     cols = col_range(cfg.item_start_col, cfg.item_end_col)
-    if stock_by_col is None or item_name_by_col is None:
-        wb_values = load_workbook(io.BytesIO(uploaded_bytes), data_only=True, read_only=True)
-        ws_values = wb_values[cfg.working_sheet]
-        stock_by_col = {col: norm(ws_values[f"{col}{cfg.stock_row}"].value) for col in cols}
-        item_name_by_col = {col: norm(ws_values[f"{col}{cfg.name_row}"].value) for col in cols}
     selected_set = set(selected_stocks)
-    multiplier_by_col: Dict[str, Dict[str, object]] = {}
     audit_rows: List[Dict[str, object]] = []
-    for col in cols:
-        item_name = norm(item_name_by_col.get(col, ""))
-        decision = detect_name_multiplier(item_name) if cfg.enable_multiplier_detection else {"status": "NONE", "multiplier": 1, "reason": "disabled"}
-        multiplier_by_col[col] = decision
-        if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
-            audit_rows.append({"column": col, "name": item_name, **decision})
 
     for target in [cfg.ds_ss_output_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
         copy_row_style(ws, cfg.total_qty_row, target, cols)
@@ -382,19 +399,25 @@ def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: L
         c.alignment = Alignment(horizontal="right")
 
     for col in cols:
-        decision = multiplier_by_col.get(col, {"status": "NONE", "multiplier": 1})
+        name = norm(name_by_col.get(col, ""))
+        decision = detect_name_multiplier(name) if cfg.enable_multiplier_detection else {"status": "NONE", "multiplier": 1, "reason": "disabled"}
         multiplier = int(decision.get("multiplier", 1) or 1) if decision.get("status") == "CONFIDENT" else 1
+        if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
+            audit_rows.append({"column": col, "name": name, **decision})
+
         ws[f"{col}{cfg.ds_ss_output_row}"] = ds_formula(col, cfg)
         ws[f"{col}{cfg.clean_qty_output_row}"] = clean_qty_formula(col, cfg, multiplier)
         ws[f"{col}{cfg.sqm_output_row}"] = sqm_formula(col, cfg)
+
         if decision.get("status") == "CONFIDENT":
-            fill = PatternFill("solid", fgColor="FCA5A5")  # red: multiplied automatically
+            fill = PatternFill("solid", fgColor="FCA5A5")
             for row in [cfg.name_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
                 ws[f"{col}{row}"].fill = fill
         elif decision.get("status") == "SUSPICIOUS":
-            fill = PatternFill("solid", fgColor="FDBA74")  # orange: check manually, no multiply
+            fill = PatternFill("solid", fgColor="FDBA74")
             for row in [cfg.name_row, cfg.clean_qty_output_row, cfg.sqm_output_row, cfg.price_output_row]:
                 ws[f"{col}{row}"].fill = fill
+
         stock = stock_by_col.get(col, "")
         if stock in selected_set:
             rate_row = selected_stocks.index(stock) + 2
@@ -408,259 +431,212 @@ def apply_formulas(uploaded_bytes: bytes, cfg: MappingConfig, selected_stocks: L
     make_multiplier_audit_sheet(wb, audit_rows)
     out = io.BytesIO()
     wb.save(out)
+    wb.close()
     return out.getvalue()
 
 
-def config_from_json(data: dict, sheet_names: List[str]):
-    payload = dict(data)
-    if isinstance(payload.get("ignore_countries"), list):
-        payload["ignore_countries"] = tuple(payload["ignore_countries"])
-    cfg = MappingConfig(**payload)
-    if cfg.working_sheet not in sheet_names or cfg.reference_sheet not in sheet_names:
-        return None
-    return cfg
+def show_error(title: str, exc: Exception) -> None:
+    st.error(title)
+    with st.expander("Technical details"):
+        st.code("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
 
 
-st.title("Excel Formula Fusion — V1.9")
-st.caption("Adds controlled stock-rate updates to reduce Streamlit reruns and memory spikes.")
+st.title("Excel Formula Fusion — V1.9.1 Stable")
+st.caption("Stable diagnostic build: low-memory loading, updated README, refresh/update rates, DS loading, multiplier audit.")
 
-uploaded_file = st.file_uploader("Upload Excel workbook", type=["xlsx"], key="main_workbook")
-if not uploaded_file:
-    st.info("Upload your workbook to start.")
-    st.stop()
-
-uploaded_bytes = uploaded_file.getvalue()
 try:
-    wb_formula = load_workbook(io.BytesIO(uploaded_bytes), read_only=False)
-    wb_values = load_workbook(io.BytesIO(uploaded_bytes), data_only=True, read_only=False)
-except Exception as e:
-    st.error(f"Could not open workbook: {e}")
-    st.stop()
+    uploaded_file = st.file_uploader("Upload Excel workbook", type=["xlsx"], key="main_workbook")
+    if not uploaded_file:
+        st.info("Upload your workbook to start.")
+        st.stop()
 
-sheet_names = wb_formula.sheetnames
+    uploaded_bytes = uploaded_file.getvalue()
+    sheet_names = get_sheet_names(uploaded_bytes)
 
-if "cfg" not in st.session_state or st.session_state.get("last_file_name") != uploaded_file.name:
-    default_work = "DL ANZ ALLOCATION" if "DL ANZ ALLOCATION" in sheet_names else sheet_names[0]
-    default_ref = "PRINT DB" if "PRINT DB" in sheet_names else sheet_names[0]
-    ws_work = wb_values[default_work]
-    ws_ref = wb_values[default_ref]
-    start_col, end_col = detect_item_cols(ws_work)
-    ref_cols = detect_reference_columns(ws_ref)
-    ref_start, ref_end = detect_reference_rows(ws_ref, ref_cols["name"], ref_cols["size"])
-    st.session_state.cfg = MappingConfig(
-        working_sheet=default_work,
-        reference_sheet=default_ref,
-        item_start_col=start_col,
-        item_end_col=end_col,
-        country_col=detect_country_col(ws_work),
-        ref_name_col=ref_cols["name"],
-        ref_size_col=ref_cols["size"],
-        ref_ds_col=ref_cols["ds"],
-        ref_stock_col=ref_cols["stock"],
-        ref_start_row=ref_start,
-        ref_end_row=ref_end,
-    )
-    st.session_state.last_file_name = uploaded_file.name
+    if "cfg" not in st.session_state or st.session_state.get("last_file_name") != uploaded_file.name:
+        st.session_state.cfg = auto_config(uploaded_bytes, sheet_names)
+        st.session_state.last_file_name = uploaded_file.name
 
-cfg: MappingConfig = st.session_state.cfg
+    cfg: MappingConfig = st.session_state.cfg
 
-with st.sidebar:
-    st.header("Mapping / Memory")
-    st.caption("Edit values in the main form, then press Apply Mapping.")
-    mapping_json = st.file_uploader("Upload Mapping JSON", type=["json"], key="mapping_json_uploader")
-    if mapping_json is not None:
+    with st.sidebar:
+        st.header("Mapping / Memory")
+        mapping_json = st.file_uploader("Upload Mapping JSON", type=["json"], key="mapping_json_uploader")
+        if mapping_json is not None:
+            try:
+                payload = json.loads(mapping_json.getvalue().decode("utf-8"))
+                if isinstance(payload.get("ignore_countries"), list):
+                    payload["ignore_countries"] = tuple(payload["ignore_countries"])
+                new_cfg = MappingConfig(**payload)
+                if new_cfg.working_sheet in sheet_names and new_cfg.reference_sheet in sheet_names:
+                    st.session_state.cfg = new_cfg
+                    cfg = new_cfg
+                    st.success("Mapping JSON loaded. Press Apply Mapping if you edit further.")
+                else:
+                    st.error("JSON sheet names do not match this workbook.")
+            except Exception as e:
+                show_error("Could not load mapping JSON", e)
+
+    with st.form("mapping_form", clear_on_submit=False):
+        st.subheader("1) Mapping Setup")
+        a, b, c, d = st.columns(4)
+        with a:
+            working_sheet = st.selectbox("Working Sheet", sheet_names, index=sheet_names.index(cfg.working_sheet) if cfg.working_sheet in sheet_names else 0)
+            reference_sheet = st.selectbox("Reference Sheet", sheet_names, index=sheet_names.index(cfg.reference_sheet) if cfg.reference_sheet in sheet_names else 0)
+        with b:
+            name_row = st.number_input("Name Row", min_value=1, value=int(cfg.name_row), step=1)
+            size_row = st.number_input("Size Row", min_value=1, value=int(cfg.size_row), step=1)
+            stock_row = st.number_input("Stock / Material Row", min_value=1, value=int(cfg.stock_row), step=1)
+            total_qty_row = st.number_input("Original Total Qty Row", min_value=1, value=int(cfg.total_qty_row), step=1)
+        with c:
+            item_start_col = st.text_input("Item Start Column", value=cfg.item_start_col).upper().strip()
+            item_end_col = st.text_input("Item End Column", value=cfg.item_end_col).upper().strip()
+            country_col = st.text_input("Country Column", value=cfg.country_col).upper().strip()
+            ignore_countries_str = st.text_input("Ignore Countries", value=", ".join(cfg.ignore_countries))
+        with d:
+            ds_ss_output_row = st.number_input("DS/SS Output Row", min_value=1, value=int(cfg.ds_ss_output_row), step=1)
+            clean_qty_output_row = st.number_input("Clean Qty Output Row", min_value=1, value=int(cfg.clean_qty_output_row), step=1)
+            sqm_output_row = st.number_input("SQM Output Row", min_value=1, value=int(cfg.sqm_output_row), step=1)
+            price_output_row = st.number_input("Price Output Row", min_value=1, value=int(cfg.price_output_row), step=1)
+            ds_loading_percent = st.number_input("DS Loading %", min_value=0.0, max_value=500.0, value=float(cfg.ds_loading_percent), step=1.0)
+            enable_multiplier_detection = st.checkbox("Detect set/pack quantity multipliers", value=bool(cfg.enable_multiplier_detection))
+
+        st.subheader("2) Reference Sheet Columns")
+        r1, r2, r3, r4, r5, r6 = st.columns(6)
+        with r1:
+            ref_name_col = st.text_input("Ref Name Column", value=cfg.ref_name_col).upper().strip()
+        with r2:
+            ref_size_col = st.text_input("Ref Size Column", value=cfg.ref_size_col).upper().strip()
+        with r3:
+            ref_ds_col = st.text_input("Ref DS/SS Column", value=cfg.ref_ds_col).upper().strip()
+        with r4:
+            ref_stock_col = st.text_input("Ref Stock Column", value=cfg.ref_stock_col).upper().strip()
+        with r5:
+            ref_start_row = st.number_input("Ref Start Row", min_value=1, value=int(cfg.ref_start_row), step=1)
+        with r6:
+            ref_end_row = st.number_input("Ref End Row", min_value=1, value=int(cfg.ref_end_row), step=1)
+        apply_mapping = st.form_submit_button("Apply Mapping")
+
+    if apply_mapping:
         try:
-            new_cfg = config_from_json(json.load(mapping_json), sheet_names)
-            if new_cfg:
-                st.session_state.cfg = new_cfg
-                st.success("Mapping JSON loaded.")
-                st.rerun()
-            else:
-                st.error("JSON sheet names do not match this workbook.")
+            for col in [item_start_col, item_end_col, country_col, ref_name_col, ref_size_col, ref_ds_col, ref_stock_col]:
+                column_index_from_string(col)
+            st.session_state.cfg = MappingConfig(
+                working_sheet=working_sheet,
+                reference_sheet=reference_sheet,
+                item_start_col=item_start_col,
+                item_end_col=item_end_col,
+                name_row=int(name_row),
+                size_row=int(size_row),
+                stock_row=int(stock_row),
+                total_qty_row=int(total_qty_row),
+                country_col=country_col,
+                ds_ss_output_row=int(ds_ss_output_row),
+                clean_qty_output_row=int(clean_qty_output_row),
+                sqm_output_row=int(sqm_output_row),
+                price_output_row=int(price_output_row),
+                enable_multiplier_detection=bool(enable_multiplier_detection),
+                ds_loading_percent=float(ds_loading_percent),
+                ref_name_col=ref_name_col,
+                ref_size_col=ref_size_col,
+                ref_ds_col=ref_ds_col,
+                ref_stock_col=ref_stock_col,
+                ref_start_row=int(ref_start_row),
+                ref_end_row=int(ref_end_row),
+                ignore_countries=tuple([x.strip().upper() for x in ignore_countries_str.split(",") if x.strip()]),
+            )
+            cfg = st.session_state.cfg
+            st.success("Mapping applied.")
         except Exception as e:
-            st.error(f"Could not load mapping JSON: {e}")
+            show_error("Mapping not applied", e)
 
-with st.form("mapping_form", clear_on_submit=False):
-    st.subheader("1) Mapping Setup")
-    a, b, c, d = st.columns(4)
-    with a:
-        working_sheet = st.selectbox("Working Sheet", sheet_names, index=sheet_names.index(cfg.working_sheet))
-        reference_sheet = st.selectbox("Reference Sheet", sheet_names, index=sheet_names.index(cfg.reference_sheet))
-    with b:
-        name_row = st.number_input("Name Row", min_value=1, value=int(cfg.name_row), step=1)
-        size_row = st.number_input("Size Row", min_value=1, value=int(cfg.size_row), step=1)
-        stock_row = st.number_input("Stock / Material Row", min_value=1, value=int(cfg.stock_row), step=1)
-        total_qty_row = st.number_input("Original Total Qty Row", min_value=1, value=int(cfg.total_qty_row), step=1)
-    with c:
-        item_start_col = st.text_input("Item Start Column", value=cfg.item_start_col).upper().strip()
-        item_end_col = st.text_input("Item End Column", value=cfg.item_end_col).upper().strip()
-        country_col = st.text_input("Country Column", value=cfg.country_col).upper().strip()
-        ignore_countries_str = st.text_input("Ignore Countries", value=", ".join(cfg.ignore_countries))
-    with d:
-        ds_ss_output_row = st.number_input("DS/SS Output Row", min_value=1, value=int(cfg.ds_ss_output_row), step=1)
-        clean_qty_output_row = st.number_input("Clean Qty Output Row", min_value=1, value=int(cfg.clean_qty_output_row), step=1)
-        sqm_output_row = st.number_input("SQM Output Row", min_value=1, value=int(cfg.sqm_output_row), step=1)
-        price_output_row = st.number_input("Price Output Row", min_value=1, value=int(cfg.price_output_row), step=1)
-        ds_loading_percent = st.number_input("DS Loading %", min_value=0.0, max_value=500.0, value=float(cfg.ds_loading_percent), step=1.0)
-        enable_multiplier_detection = st.checkbox("Detect set/pack quantity multipliers", value=bool(cfg.enable_multiplier_detection))
+    cfg = st.session_state.cfg
 
-    st.subheader("2) Reference Sheet Columns")
-    r1, r2, r3, r4, r5, r6 = st.columns(6)
-    with r1:
-        ref_name_col = st.text_input("Ref Name Column", value=cfg.ref_name_col).upper().strip()
-    with r2:
-        ref_size_col = st.text_input("Ref Size Column", value=cfg.ref_size_col).upper().strip()
-    with r3:
-        ref_ds_col = st.text_input("Ref DS/SS Column", value=cfg.ref_ds_col).upper().strip()
-    with r4:
-        ref_stock_col = st.text_input("Ref Stock Column", value=cfg.ref_stock_col).upper().strip()
-    with r5:
-        ref_start_row = st.number_input("Ref Start Row", min_value=1, value=int(cfg.ref_start_row), step=1)
-    with r6:
-        ref_end_row = st.number_input("Ref End Row", min_value=1, value=int(cfg.ref_end_row), step=1)
-    apply_mapping = st.form_submit_button("Apply Mapping")
+    st.subheader("Current Mapping Summary")
+    st.dataframe(pd.DataFrame([asdict(cfg)]).T.reset_index().rename(columns={"index": "Setting", 0: "Value"}), use_container_width=True, hide_index=True)
 
-if apply_mapping:
-    try:
-        # Validate columns before storing.
-        for col in [item_start_col, item_end_col, country_col, ref_name_col, ref_size_col, ref_ds_col, ref_stock_col]:
-            column_index_from_string(col)
-        st.session_state.cfg = MappingConfig(
-            working_sheet=working_sheet,
-            reference_sheet=reference_sheet,
-            item_start_col=item_start_col,
-            item_end_col=item_end_col,
-            name_row=int(name_row),
-            size_row=int(size_row),
-            stock_row=int(stock_row),
-            total_qty_row=int(total_qty_row),
-            country_col=country_col,
-            ds_ss_output_row=int(ds_ss_output_row),
-            clean_qty_output_row=int(clean_qty_output_row),
-            sqm_output_row=int(sqm_output_row),
-            price_output_row=int(price_output_row),
-            enable_multiplier_detection=bool(enable_multiplier_detection),
-            ds_loading_percent=float(ds_loading_percent),
-            ref_name_col=ref_name_col,
-            ref_size_col=ref_size_col,
-            ref_ds_col=ref_ds_col,
-            ref_stock_col=ref_stock_col,
-            ref_start_row=int(ref_start_row),
-            ref_end_row=int(ref_end_row),
-            ignore_countries=tuple([x.strip().upper() for x in ignore_countries_str.split(",") if x.strip()]),
-        )
-        st.success("Mapping applied.")
-        st.rerun()
-    except Exception as e:
-        st.error(f"Mapping not applied: {e}")
+    stock_by_col, name_by_col, audit_preview = get_ui_maps(uploaded_bytes, cfg)
 
-cfg = st.session_state.cfg
-ws_values = wb_values[cfg.working_sheet]
-
-st.subheader("Current Mapping Summary")
-st.dataframe(pd.DataFrame([asdict(cfg)]).T.reset_index().rename(columns={"index": "Setting", 0: "Value"}), use_container_width=True, hide_index=True)
-
-st.subheader("Quantity Multiplier Detection Preview")
-if cfg.enable_multiplier_detection:
-    audit_preview = []
-    for col in col_range(cfg.item_start_col, cfg.item_end_col):
-        item_name = norm(ws_values[f"{col}{cfg.name_row}"].value)
-        decision = detect_name_multiplier(item_name)
-        if decision.get("status") in {"CONFIDENT", "SUSPICIOUS"}:
-            audit_preview.append({"Column": col, "Name": item_name, "Status": decision.get("status"), "Multiplier": decision.get("multiplier"), "Reason": decision.get("reason")})
-    if audit_preview:
-        st.dataframe(pd.DataFrame(audit_preview), use_container_width=True, hide_index=True)
-        st.caption("CONFIDENT rows will be multiplied and highlighted red. SUSPICIOUS rows will be highlighted orange but not multiplied.")
+    st.subheader("Quantity Multiplier Detection Preview")
+    if cfg.enable_multiplier_detection:
+        if audit_preview:
+            st.dataframe(pd.DataFrame(audit_preview), use_container_width=True, hide_index=True)
+            st.caption("CONFIDENT rows will be multiplied and highlighted red. SUSPICIOUS rows will be highlighted orange but not multiplied.")
+        else:
+            st.info("No set/pack multiplier wording detected in the selected item columns.")
     else:
-        st.info("No set/pack multiplier wording detected in the selected item columns.")
-else:
-    st.info("Multiplier detection is disabled.")
+        st.info("Multiplier detection is disabled.")
 
-st.subheader("Stock / Material Rates")
-st.info("Rates are staged inside a form. Changing a price will not regenerate the workbook. Press Refresh / Update Rates when finished.")
-all_stocks = unique_stocks(ws_values, cfg)
-rate_memory = load_rate_memory()
-selected_defaults = [s for s in all_stocks if s in rate_memory]
-if not selected_defaults and all_stocks:
-    selected_defaults = all_stocks[:1]
-selected_stocks = st.multiselect("Pick one or more stocks/materials", all_stocks, default=selected_defaults, key="selected_stocks")
+    st.subheader("Stock / Material Rates")
+    all_stocks = sorted(set(v for v in stock_by_col.values() if v))
+    rate_memory = load_rate_memory()
+    selected_defaults = [s for s in all_stocks if s in rate_memory] or (all_stocks[:1] if all_stocks else [])
+    selected_stocks = st.multiselect("Pick one or more stocks/materials", all_stocks, default=selected_defaults, key="selected_stocks")
 
-stock_rates: Dict[str, float] = {stock: float(rate_memory.get(stock, 0.0)) for stock in selected_stocks}
-if selected_stocks:
-    with st.form("stock_rates_form", clear_on_submit=False):
-        st.caption("Enter or edit all rates, then press Refresh / Update Rates once.")
-        cols = st.columns(min(4, max(1, len(selected_stocks))))
-        staged_rates: Dict[str, float] = {}
-        for i, stock in enumerate(selected_stocks):
-            with cols[i % len(cols)]:
-                key = "rate_input_" + re.sub(r"[^A-Za-z0-9_]+", "_", stock)[:80]
-                staged_rates[stock] = st.number_input(
-                    f"Rate: {stock[:35]}",
-                    min_value=0.0,
-                    value=float(rate_memory.get(stock, 0.0)),
-                    step=0.10,
-                    key=key,
-                )
-        update_rates = st.form_submit_button("Refresh / Update Rates")
-    if update_rates:
-        merged = load_rate_memory()
-        merged.update(staged_rates)
-        save_rate_memory(merged)
-        st.success("Rates updated and saved to memory.")
-        rate_memory = load_rate_memory()
-        stock_rates = {stock: float(rate_memory.get(stock, 0.0)) for stock in selected_stocks}
+    if selected_stocks:
+        with st.form("stock_rates_form", clear_on_submit=False):
+            st.caption("Enter or edit all rates, then press Refresh / Update Rates once. This avoids reprocessing the workbook on every price change.")
+            ncols = min(4, max(1, len(selected_stocks)))
+            cols = st.columns(ncols)
+            staged_rates: Dict[str, float] = {}
+            for i, stock in enumerate(selected_stocks):
+                with cols[i % ncols]:
+                    key = "rate_input_" + re.sub(r"[^A-Za-z0-9_]+", "_", stock)[:80]
+                    staged_rates[stock] = st.number_input(
+                        f"Rate: {stock[:35]}",
+                        min_value=0.0,
+                        value=float(rate_memory.get(stock, 0.0)),
+                        step=0.10,
+                        key=key,
+                    )
+            update_rates = st.form_submit_button("Refresh / Update Rates")
+        if update_rates:
+            merged = load_rate_memory()
+            merged.update(staged_rates)
+            save_rate_memory(merged)
+            st.success("Rates updated and saved to memory.")
+            rate_memory = load_rate_memory()
+        st.dataframe(pd.DataFrame([{"Stock / Material": s, "Saved Rate": float(load_rate_memory().get(s, 0.0))} for s in selected_stocks]), use_container_width=True, hide_index=True)
+    else:
+        st.warning("No stocks selected. Price row will be 0 unless you select stock/materials.")
 
-    st.dataframe(
-        pd.DataFrame([{"Stock / Material": s, "Saved Rate": float(load_rate_memory().get(s, 0.0))} for s in selected_stocks]),
-        use_container_width=True,
-        hide_index=True,
-    )
-else:
-    st.warning("No stocks selected. Price row will be 0 unless you select stock/materials.")
+    with st.expander("Rate memory backup / restore"):
+        rate_upload = st.file_uploader("Upload Stock Rate Memory JSON", type=["json"], key="rate_json")
+        if rate_upload is not None:
+            try:
+                uploaded_rates = {str(k): float(v) for k, v in json.loads(rate_upload.getvalue().decode("utf-8")).items()}
+                save_rate_memory(uploaded_rates)
+                st.success("Rate memory restored.")
+            except Exception as e:
+                show_error("Could not restore rates", e)
+        st.download_button("Download Stock Rate Memory JSON", json.dumps(load_rate_memory(), indent=2, sort_keys=True), "stock_rates_memory.json", "application/json")
 
-with st.expander("Rate memory backup / restore"):
-    rate_upload = st.file_uploader("Upload Stock Rate Memory JSON", type=["json"], key="rate_json")
-    if rate_upload is not None:
+    st.subheader("Formula Preview")
+    preview_col = cfg.item_start_col
+    example_decision = detect_name_multiplier(name_by_col.get(preview_col, "")) if cfg.enable_multiplier_detection else {"multiplier": 1, "status": "NONE"}
+    example_mult = int(example_decision.get("multiplier", 1) or 1) if example_decision.get("status") == "CONFIDENT" else 1
+    st.code(clean_qty_formula(preview_col, cfg, example_mult), language="excel")
+    st.code(ds_formula(preview_col, cfg), language="excel")
+    st.code(sqm_formula(preview_col, cfg), language="excel")
+    if selected_stocks:
+        st.code(price_formula(preview_col, cfg, "'Stock SQM Summary'!$C$2"), language="excel")
+
+    st.subheader("Export")
+    e1, e2 = st.columns(2)
+    with e1:
+        generate = st.button("Generate Excel Workbook")
+    with e2:
+        st.download_button("Download Mapping JSON", json.dumps(asdict(cfg), indent=2), "excel_formula_fusion_mapping.json", "application/json")
+
+    if generate:
         try:
-            uploaded_rates = {str(k): float(v) for k, v in json.load(rate_upload).items()}
-            save_rate_memory(uploaded_rates)
-            st.success("Rate memory restored.")
-        except Exception as e:
-            st.error(f"Could not restore rates: {e}")
-    st.download_button("Download Stock Rate Memory JSON", json.dumps(load_rate_memory(), indent=2, sort_keys=True), "stock_rates_memory.json", "application/json")
-
-st.subheader("Formula Preview")
-preview_col = cfg.item_start_col
-example_decision = detect_name_multiplier(norm(ws_values[f"{preview_col}{cfg.name_row}"].value)) if cfg.enable_multiplier_detection else {"multiplier": 1, "status": "NONE"}
-example_mult = int(example_decision.get("multiplier", 1) or 1) if example_decision.get("status") == "CONFIDENT" else 1
-st.code(clean_qty_formula(preview_col, cfg, example_mult), language="excel")
-st.code(ds_formula(preview_col, cfg), language="excel")
-st.code(sqm_formula(preview_col, cfg), language="excel")
-if selected_stocks:
-    st.code(price_formula(preview_col, cfg, "'Stock SQM Summary'!$C$2"), language="excel")
-
-with st.expander("Workbook Preview"):
-    st.dataframe(preview_df(ws_values), use_container_width=True, hide_index=True)
-
-st.subheader("Export")
-e1, e2 = st.columns(2)
-with e1:
-    generate = st.button("Generate Excel Workbook")
-with e2:
-    st.download_button("Download Mapping JSON", json.dumps(asdict(cfg), indent=2), "excel_formula_fusion_mapping.json", "application/json")
-
-if generate:
-    try:
-        merged = load_rate_memory()
-        merged.update(stock_rates)
-        save_rate_memory(merged)
-        with st.spinner("Generating formula workbook..."):
-            cols_for_export = col_range(cfg.item_start_col, cfg.item_end_col)
-            stock_by_col = {col: norm(ws_values[f"{col}{cfg.stock_row}"].value) for col in cols_for_export}
-            item_name_by_col = {col: norm(ws_values[f"{col}{cfg.name_row}"].value) for col in cols_for_export}
             latest_rates = {stock: float(load_rate_memory().get(stock, 0.0)) for stock in selected_stocks}
-            output = apply_formulas(uploaded_bytes, cfg, selected_stocks, latest_rates, stock_by_col, item_name_by_col)
-        st.success("Workbook generated.")
-        st.download_button("Download Excel Workbook", output, "excel_formula_fusion_output.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-    except Exception as e:
-        st.error(f"Export failed: {e}")
+            with st.spinner("Generating formula workbook..."):
+                output = apply_formulas(uploaded_bytes, cfg, selected_stocks, latest_rates, stock_by_col, name_by_col)
+            st.success("Workbook generated.")
+            st.download_button("Download Excel Workbook", output, "excel_formula_fusion_output.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as e:
+            show_error("Export failed", e)
+
+except Exception as e:
+    show_error("The app hit an unexpected error before it could finish loading.", e)
