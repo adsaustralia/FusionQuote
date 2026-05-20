@@ -1,35 +1,33 @@
-# Excel Formula Fusion — Dynamic V1.7
+# Excel Formula Fusion — Stable V1.7.1
 
-Streamlit app for formula-based Excel automation.
+Streamlit app for formula-based Excel workbook automation.
 
-## V1.7 fixes
+## Main fixes in V1.7.1
 
-- Fixed file uploader/button visibility by removing the black uploader styling.
-- Faster workbook generation: no repeated workbook load inside every item column loop.
-- Stock/material selector supports multiple stocks.
-- Stock rates are remembered in session and saved to `data/stock_rates_memory.json` when possible.
-- Added stock rate memory JSON download/upload for backup and Streamlit Cloud redeploys.
-- Added DS loading percentage, default 20%.
-- Item price formula applies DS loading only when DS/SS lookup returns DS / Double Sided / D/S.
-- Stock summary total price is summed from item price formulas, so DS loading is included correctly.
+- safer app startup: no cached openpyxl workbook objects
+- better error handling if workbook loading or export fails
+- upload button and download button visibility kept light/high-contrast
+- multi-stock/material selection
+- stock rate memory with JSON backup/restore
+- DS loading default 20%
+- clean quantity = original total qty row minus ignored-country quantity
+- does not require store qty start/end rows
 
-## Deploy on Streamlit Cloud
+## Deploy
 
-Put these files in the GitHub repo root:
+Upload these files to the root of your GitHub repo:
 
 - `app.py`
 - `requirements.txt`
 - `.streamlit/config.toml`
 - `README.md`
 
-Set Streamlit main file path to:
+In Streamlit Cloud, set main file path:
 
 ```text
 app.py
 ```
 
-## Important notes
+## Important
 
-Streamlit reruns the script when widgets change. This app uses forms for mapping changes, but stock/rate widgets still rerun lightly. Heavy Excel export only runs when you click **Generate Excel Workbook**.
-
-Stock rates can be backed up by downloading `stock_rates_memory.json`.
+Streamlit reruns when widgets change. This version keeps mapping edits inside an Apply Mapping form to avoid exporting/processing on every small change.
