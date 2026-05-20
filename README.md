@@ -1,59 +1,36 @@
-# Excel Formula Fusion V2.1 Recovery Stable
+# Excel Formula Fusion V2.2 Ultra Stable
 
-This is a recovery/stability build. It deliberately avoids heavy processing during upload.
+This build is designed to stop Streamlit Cloud startup crashes.
 
-## Important change
+## Stability changes
 
-Upload only stores the workbook. You must press **Read workbook / detect sheets** before mapping appears. This prevents Streamlit Cloud from crashing while typing or uploading.
+- No heavy workbook processing at app startup.
+- `openpyxl` is imported only when needed.
+- Upload responds immediately.
+- Sheet names are read using lightweight XLSX zip/XML parsing first.
+- Workbook generation runs only after pressing **Generate Excel Workbook**.
+- Stock names scan only from selected Start Column to End Column.
+- Stock rates are entered in a clear **Stock/material rates** section and saved only after **Refresh / Update Rates**.
 
-## Main features
+## Logic
 
-- Upload workbook safely.
-- Read sheet names only after button click.
-- Select working and reference sheets.
-- Stock/material list scans only from selected Start Column to End Column.
-- Enter multiple stock rates in a clear table-style section.
-- Save stock rates in session and download/upload JSON backup.
-- Clean qty formula uses total qty row minus ignored-country rows.
-- DS loading default is 20%.
-- Detects confident multipliers like `set of 4` and `1 PACK = 100`; red flag and multiply.
-- Orange flag for doubtful set/pack wording; does not multiply.
-- Formula workbook is generated only after **Generate Excel Workbook**.
+- Working name row default: 4
+- Size row default: 5
+- Stock row default: 6
+- Total qty row default: 7
+- Country column default: I
+- Clean qty = total qty minus ignored-country qty
+- Blank country rows are not counted as ignored country rows
+- DS/SS lookup from reference sheet
+- DS loading default: 20%
+- Multiplier detection:
+  - `set of 4` multiplies by 4 and highlights red
+  - `1 PACK = 100` multiplies by 100 and highlights red
+  - unclear set/pack wording highlights orange and does not multiply
 
-## Default HOKA mapping
+## Deploy
 
-- Working sheet: DL ANZ ALLOCATION
-- Reference sheet: PRINT DB
-- Name row: 4
-- Size row: 5
-- Stock row: 6
-- Original total qty row: 7
-- Country column: I
-- Item columns: AC to IG
-- DS/SS output row: 168
-- Clean qty output row: 169
-- Multiplier row: 170
-- SQM row: 171
-- Price row: 172
-
-## Reference defaults
-
-- Name/artwork column: C
-- Size column: E
-- DS/SS column: F
-- Stock/material column: G
-- Reference rows: 12 to 141
-
-## GitHub / Streamlit Cloud
-
-Upload these to your repository root:
-
-- `app.py`
-- `requirements.txt`
-- `.streamlit/config.toml`
-- `README.md`
-
-Main file path:
+Upload all files to the GitHub repository root and set Streamlit main file path to:
 
 ```text
 app.py
